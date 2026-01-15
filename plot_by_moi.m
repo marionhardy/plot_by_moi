@@ -1,0 +1,988 @@
+% This code plots imaging experiment data by celltype or by treatment type.
+% inspired by plot_by_ND('treatment', dataloc, varargin)
+% INPUTS
+% document
+% EXAMPLE USAGE
+% plot_by_moi('composite', dl,  'channel', {'RAMPKAR2','HYLIGHT','Perceval'},  'facetby', {'Gluc'});  
+% 
+% plot_by_moi('composite_collapse', dl, 'splitpercell', false);
+% 
+% plot_by_moi('custom',f2Data{1},'groupby',{'Oligo','Vehicle'},'facetby',{'Gluc'}, 'plottype', {'grouped'}, 'channel', plotme, ...
+%     'combinexys',true, 'overlapmeans',true, 'exclude',{'MK8722','NoIns'}, 'errortype','std',  'show_tx_label',false) 
+% -------------------------------------------------------------------------
+% VERSION 1.0
+function plot_by_moi(plotby,dataloc,varargin)
+                                                                                                                                                                          
+%% Input parsing
+ip = inputParser;
+ip.KeepUnmatched = true;
+ip.CaseSensitive = false;
+% Helper functions
+isRGB = @(x) isnumeric(x) && numel(x) == 3 && all(x >= 0) && all(x <= 1);
+isNonNegScalar = @(x) isnumeric(x) && isscalar(x) && x >= 0;
+isCellStr = @(x) iscell(x) && all(cellfun(@ischar, x));
+% Add parameters (alphabetical)
+addParameter(ip, 'addif', false, @islogical);
+addParameter(ip, 'addmedian', true, @islogical);
+addParameter(ip, 'addstats', true, @islogical);
+addParameter(ip, 'addthreshline', true, @islogical);
+addParameter(ip, 'aftertreatment', 1, isNonNegScalar);
+addParameter(ip, 'analysischan', {'freq','durs'}, isCellStr);
+addParameter(ip, 'channel', {'HYLIGHT'});
+addParameter(ip, 'cmap', 'lines', @(x) ischar(x) || isstring(x) || ...
+    isa(x,'function_handle') || (isnumeric(x) && size(x,2)==3));
+addParameter(ip, 'combinexys', true, @islogical);
+addParameter(ip, 'common_ylim', [], @(x) isempty(x) || (islogical(x) && isscalar(x)) || ...
+    (isnumeric(x) && numel(x)==2 && all(isfinite(x))) || ...
+    iscell(x) || isstruct(x) || isa(x,'containers.Map'));
+addParameter(ip, 'composite_tx', [], @(x) isempty(x) || ischar(x) || isstring(x) || iscell(x));
+addParameter(ip, 'debug',true, @islogical);
+addParameter(ip, 'deltaprctl', [2, 98], @(x) isnumeric(x) && numel(x)==2);
+addParameter(ip, 'divtime', [], @(x) isempty(x) || isnumeric(x));
+addParameter(ip, 'errortype', 'sem', @(x) any(validatestring(x, {'sem','std','ci','quantiles','quantile','q','qtl','iqr'})));
+addParameter(ip, 'exclude', [], @(x) isnumeric(x) || iscell(x));
+addParameter(ip, 'facetby', {}, @(x) iscell(x) || isstring(x));
+addParameter(ip, 'font_size', 8, isNonNegScalar);
+addParameter(ip, 'groupby', {}, @(x) iscell(x) || isstring(x));
+addParameter(ip, 'imagesize', [1280, 1080], @(x) isnumeric(x) && numel(x)==2);
+addParameter(ip, 'lengththresh', 1, isNonNegScalar);
+addParameter(ip, 'looptime', 6, isNonNegScalar);
+addParameter(ip, 'ncells', [], @(x) isempty(x) || isscalar(x));
+addParameter(ip, 'nogene', 0, @(x) islogical(x) || isnumeric(x)); 
+addParameter(ip, 'normalize_scope', 'per_facet', @(x) any(validatestring(x,{'per_facet','per_sensor'})));
+addParameter(ip, 'nstacks', 1, isNonNegScalar);
+addParameter(ip, 'ntracks', 5, isNonNegScalar);
+addParameter(ip, 'overlapmeans', true, @islogical);
+addParameter(ip, 'overlaptx', [], @(x) isempty(x) || ischar(x) || iscell(x));
+addParameter(ip, 'per_tile_legend', true, @islogical);  
+addParameter(ip, 'plotfromzero', false, @islogical);
+addParameter(ip, 'plottype', {'mean'}, isCellStr);
+addParameter(ip, 'printstyle', 'svg', @(x) any(validatestring(x, {'svg','png','pdf','eps'})));
+addParameter(ip, 'qtiles', true, @islogical);
+addParameter(ip, 'rownorm',false, @islogical);
+addParameter(ip, 'rowsort', 'none',@(x) any(validatestring(x,{'none','mean','peak'})));
+addParameter(ip, 'show_tx_labels', true, @islogical);                % show/hide text on tx lines
+addParameter(ip, 'smooth', [], @(x) isempty(x) || isvector(x));
+addParameter(ip, 'splitpercell',true, @islogical);
+addParameter(ip, 'subset', [], @(x) isnumeric(x) || iscell(x));
+addParameter(ip, 'tbeforetx', [], @(x) isempty(x) || isscalar(x));
+addParameter(ip, 'tmaxaftertx', [], @(x) isempty(x) || isscalar(x));
+addParameter(ip, 'tmaxback', 3, isNonNegScalar);
+addParameter(ip, 'tstartaftertx', [], @(x) isempty(x) || isscalar(x));
+addParameter(ip, 'tx_order', 1, isNonNegScalar);
+addParameter(ip, 'withoutzeros', false, @islogical);
+addParameter(ip, 'xys', [], @(x) isempty(x) || isnumeric(x));
+addParameter(ip, 'ylims', [], @(x) isempty(x) || (isnumeric(x) && numel(x)==2));
+
+% zerohrtx removed (Fix D)
+
+% parse
+parse(ip, varargin{:});
+p = ip.Results;
+
+% Merge unmatched parameters (like tx_lines, show_tx_label) so they appear in p
+if ~isempty(fieldnames(ip.Unmatched))
+    unmatchedFields = fieldnames(ip.Unmatched);
+    for i = 1:numel(unmatchedFields)
+        p.(unmatchedFields{i}) = ip.Unmatched.(unmatchedFields{i});
+    end
+end
+
+% Allow both 'show_tx_label' and 'show_tx_labels'
+if isfield(p,'show_tx_label') && ~isfield(p,'show_tx_labels')
+    p.show_tx_labels = p.show_tx_label;
+end
+
+% If groupby/facetby are specified, override plotby behavior
+use_custom_grouping = ~isempty(p.groupby) || ~isempty(p.facetby); 
+if use_custom_grouping && ~strcmpi(plotby,'composite')
+    plotby = 'custom';  % special mode to trigger downstream logic
+end
+% Fix groupby/facetby to row cell arrays
+if isstring(p.groupby); p.groupby = cellstr(p.groupby); end
+if isstring(p.facetby); p.facetby = cellstr(p.facetby); end
+if iscolumn(p.groupby); p.groupby = p.groupby'; end
+if iscolumn(p.facetby); p.facetby = p.facetby'; end
+
+% switch for specific plot
+switch lower(plotby)
+    case {'treatment','treatments','tx','txs'}
+        plotby = 'treatment';
+    case {'cell','celltype','celltypes'}
+        plotby = 'celltype';
+    case {'heatmap_xy','hmap_xy','xy_heatmap'}
+        plotby = 'heatmap_xy';
+    case {'pulse','pulseanal','pulses','pulseplot'}
+        plotby = 'pulseplot';
+    case {'treatmentoverlay','overlay'}
+        plotby = 'treatmentoverlay';
+    case {'custom','group','grouped'}
+        plotby = 'custom';
+    case {'composite','comp'}
+        plotby = 'composite';
+    case {'composite_collapse'}
+        plotby = 'composite_collapse';
+    otherwise
+        error('Accepted plotby types: treatment, celltype, pulseplot, custom, composite or overlay. plotby must be a string.');
+end
+
+%% Standardize Time Units 
+if isfield(dataloc,'movieinfo')
+    p.looptime = dataloc.movieinfo.tsamp;
+    p.imagesize = [dataloc.movieinfo.PixNumY,dataloc.movieinfo.PixNumX];
+    p.imagscaling = [dataloc.movieinfo.PixSizeY,dataloc.movieinfo.PixSizeX];
+end 
+
+% Define conversion factors once
+frames_per_hr = 60 / p.looptime; 
+p.tktm = frames_per_hr; % Legacy support for older parts of code
+
+% Helper anonymous functions for consistency
+to_frames = @(hr) round(hr * frames_per_hr);
+to_hours  = @(fr) (fr - 1) / frames_per_hr;
+
+% Apply conversions to parameters immediately
+if ~isempty(p.tstartaftertx); p.tstartaftertx = to_frames(p.tstartaftertx); end 
+if ~isempty(p.tmaxaftertx);   p.tmaxaftertx   = to_frames(p.tmaxaftertx);   end
+if ~isempty(p.tbeforetx);     p.tbeforetx     = to_frames(p.tbeforetx);     end
+if ~isempty(p.divtime);       p.divtime       = to_frames(p.divtime);       end
+
+% Standardize cell inputs
+if ~iscell(p.channel); p.channel = {p.channel}; end 
+if ~iscell(p.plottype); p.plottype = {p.plottype}; end 
+if ~isempty(p.subset) && ~iscell(p.subset); p.subset = {p.subset}; end 
+if ~isempty(p.exclude) && ~iscell(p.exclude); p.exclude = {p.exclude}; end 
+if ~iscell(p.analysischan); p.analysischan = {p.analysischan}; end
+
+%% Get cell type names
+if isempty(dataloc.platemapd)
+    warning('Your dataloc does not have platemap data, rerun DatalocHandler and ensure it finds the platemap. Then try again.');
+    return;
+end
+
+nct = ceil(size(dataloc.platemapd.pmd.Cell,3)/3);  ci = 3*((1:nct)-1) + 1;
+if ~exist('linetp','var') || isempty(linetp), linetp = {'-'}; end
+
+if ~p.nogene % cat celltype to gene unless indicated
+    genecat = cell(size(dataloc.platemapd.pmd.Gene(:,:,1)));
+    for s = 1: size(dataloc.platemapd.pmd.Gene,3)
+        genecat = cellfun(@(x,y)[x,y], genecat, dataloc.platemapd.pmd.Gene(:,:,s), ...
+            'UniformOutput', false);
+    end
+    % Cat genes to cells
+    cnames = cellfun(@(x,y)[x,'_',y], dataloc.platemapd.pmd.Cell(:,:,ci), ...
+                repmat(genecat,[1,1,numel(ci)]), ...
+                'UniformOutput', false);
+else
+    cnames = cell(size(dataloc.platemapd.pmd.Cell(:,:,1)));
+    for s = 1:numel(ci)
+        cnames = cellfun(@(x,y)[x,y],cnames,dataloc.platemapd.pmd.Cell(:,:,s),'Un',0);
+    end
+    
+    nancell = find(~cell2mat(cellfun(@ischar,cnames,'Un',0)));
+    for s = 1:numel(nancell)
+       cnames{nancell(s)} = ''; 
+    end
+end
+
+% Robust Name Cleaning 
+cnames = regexprep(cnames, '[^a-zA-Z0-9]', '_');   % 1. non-alnum → _
+cnames = regexprep(cnames, '_{2,}', '_');          % 2. collapse __
+cnames = regexprep(cnames, '^_|_$', '');           % 3. trim _
+cnames = regexprep(cnames, '(^[\d])', 'x$1');      % 4. leading digit → xN
+
+% 5. Fill empty names
+empty_mask = cellfun(@isempty, cnames);
+if any(empty_mask)
+    cnames(empty_mask) = {'Unlabeled'};
+end
+
+% Make a name for each unique catted string
+[celltypes] = unique(cnames(cellfun(@ischar,cnames)));
+% Disregard invalid names and warn
+gn = cellfun(@isvarname,celltypes);
+if any(~gn)
+    if any(~cellfun(@(x)strcmp(x,'_'),celltypes(~gn)))
+        warning(['Invalid cell name found for idx: ', celltypes{find(~gn,1)}]);
+    end
+    celltypes = celltypes(gn);
+end
+celltypes = celltypes(~cellfun(@isempty,celltypes)); % discard empty name fields
+
+% get rid of @ density if present for fieldname
+cellfn = cellfun(@(x)x{1},regexp(celltypes,'@','split'),'un',0);
+% remove any spaces in name
+cellfn = arrayfun(@(x)regexprep(cellfn{x},'[^a-zA-Z0-9]','_'),1:numel(cellfn),'un',0);
+% add x to beginning of name starts with number
+cellfn = arrayfun(@(x)regexprep(cellfn{x},'(^[\d_]+\w)','x$1'),1:numel(cellfn),'un',0);
+cellfn = cellfn';
+
+% Assign matching xy positions to each compiled cell name
+for s = 1:numel(celltypes)
+    idx.(celltypes{s}) = [dataloc.platemapd.pmd.xy{strcmp(celltypes{s},cnames)}];  
+end
+
+%% Find good xys that actually have data
+goodxy = false(1,max([dataloc.platemapd.pmd.xy{:}])); 
+for ii=1:size(dataloc.d,2)
+    if ~isempty(dataloc.d{ii}) && isfield(dataloc.d{ii},'cellindex') && ~isempty(dataloc.d{ii}.cellindex)
+        goodxy(ii)=1;
+    end
+end
+
+%% Plotting
+switch plotby
+    % Specific type of plots
+    case 'heatmap'
+        % (Heatmap branch omitted here – unchanged from your original)
+        error('Heatmap mode not implemented in this snippet.');
+    
+    case 'heatmap_xy'
+    % Basic timing
+    dt_hr = p.looptime/60;                 % hours per frame
+
+    % Which XYs to include
+    xysAll = find(goodxy);
+    if ~isempty(p.xys)
+        xysAll = intersect(xysAll(:).', p.xys(:).');
+    end
+    if isempty(xysAll)
+        warning('[heatmap_xy] No XY with data to plot.'); 
+        return;
+    end
+
+    % One figure per XY; stack one heatmap per requested channel
+    for ix = 1:numel(xysAll)
+        xy = xysAll(ix);
+        S  = dataloc.d{xy};
+        if isempty(S) || ~isstruct(S) || ~isfield(S,'data') || isempty(S.data)
+            continue;
+        end
+
+        nChan = numel(p.channel);
+        fig = figure('Color','w','Units','inches','Position',[2 2 9 max(3,2.2*nChan)]);
+        set(fig,'DefaultAxesFontSize',max(10,p.font_size));
+        tl = tiledlayout(nChan,1,'TileSpacing','compact','Padding','compact');
+        sgtitle(tl, sprintf('XY %d — Heatmaps', xy), 'Interpreter','none');
+
+        for iChan = 1:nChan
+            ax = nexttile; hold(ax,'on');
+            chReq = char(p.channel{iChan});
+
+            % robust channel lookup (inline)
+            fns = fieldnames(S.data);
+            j = find(strcmp(fns, chReq), 1);
+            if isempty(j), j = find(strcmpi(fns, chReq), 1); end
+            if isempty(j)
+                ch_s = regexprep(chReq,'\W',''); fns_s = regexprep(fns,'\W','');
+                j = find(strcmpi(fns_s, ch_s), 1);
+            end
+            if isempty(j)
+                pat = ['(^|[_])', regexptranslate('escape', chReq), '([_]|$)'];
+                hit = ~cellfun('isempty', regexpi(fns, pat));
+                j = find(hit,1);
+            end
+            if isempty(j)
+                text(ax,0.5,0.5,['Channel not found: ',chReq], ...
+                    'HorizontalAlignment','center','Units','normalized');
+                axis(ax,'off'); continue;
+            end
+
+            M = S.data.(fns{j});
+            if ~isnumeric(M) || isempty(M)
+                text(ax,0.5,0.5,'No numeric data','HorizontalAlignment','center','Units','normalized');
+                axis(ax,'off'); continue;
+            end
+
+            % optional per-row min–max normalization
+            if p.rownorm
+                mn = min(M,[],2,'omitnan'); mx = max(M,[],2,'omitnan');
+                span = mx - mn; span(~isfinite(span) | span<=0) = 1;
+                M = (M - mn) ./ span;
+            end
+
+            % optional row sorting
+            switch lower(p.rowsort)
+                case 'mean'
+                    [~,ord] = sort(mean(M,2,'omitnan'),'descend'); M = M(ord,:);
+                case 'peak'
+                    [~,ord] = sort(max(M,[],2,'omitnan'),'descend'); M = M(ord,:);
+                otherwise
+                    % no sort
+            end
+
+            % draw heatmap
+            hImg = imagesc(ax, M);
+            set(hImg,'AlphaData',~isnan(M));
+            axis(ax,'tight'); ax.YDir = 'normal'; box(ax,'on');
+            colormap(ax, parula(256));  % use your cmap if you prefer
+            colorbar(ax);
+
+            % x-axis in hours
+            T = size(M,2);
+            xt = get(ax,'XTick'); xt(xt<1 | xt>T) = [];
+            if isempty(xt), xt = round(linspace(1,T,6)); end
+            set(ax,'XTick',xt,'XTickLabel',arrayfun(@(x)sprintf('%.1f',(x-1)*dt_hr),xt,'UniformOutput',false));
+            xlabel(ax,'Time (hours)');
+            ylabel(ax,'Cells');
+            title(ax, sprintf('%s — XY %d', fns{j}, xy), 'Interpreter','none');
+        end
+
+        % save (SVG like other cases)
+        saveDir = fullfile(pwd,'figures'); 
+        if ~exist(saveDir,'dir'), mkdir(saveDir); end
+        fname = sanitize_filename(sprintf('HeatmapXY_XY%03d_%s', xy, ...
+                 strjoin(cellfun(@char,string(p.channel),'UniformOutput',false),'_')));
+        try
+            exportgraphics(fig, fullfile(saveDir,[fname '.svg']), 'ContentType','vector');
+        catch
+            print(fig, fullfile(saveDir, fname), '-dsvg', '-painters');
+        end
+        if p.debug, fprintf('[heatmap_xy] Saved: %s\n', fullfile(saveDir,[fname '.svg'])); end
+    end
+    
+    % Plot by Cell type
+    case 'treatment'
+        % (Original treatment branch – omitted for brevity)
+        error('Treatment mode not implemented in this snippet.');
+        
+    case 'celltype'
+        % (Original celltype branch – omitted for brevity)
+        error('Celltype mode not implemented in this snippet.');
+        
+    case 'custom'
+        pmd = dataloc.platemapd.pmd;
+        % hours per frame (for converting 'tp' to hours)
+        dt_hr = [];
+        if isfield(p, 'looptime') && ~isempty(p.looptime) && p.looptime > 0
+            dt_hr = p.looptime/60;
+        end
+        
+        % Look in ALL treatment fields for both Facets and Groups
+        facetFields = resolve_fieldset_for(pmd, p.facetby, {'pTx', 'Tx1', 'Tx2'}); 
+        groupFields = resolve_fieldset_for(pmd, p.groupby, {'Tx1', 'Tx2', 'pTx'});
+        
+        % Build facet levels (Split by Name + Dose)
+        facetLevels = find_treatments_by_tokens(pmd, p.facetby, ...
+            'Fields', facetFields, 'GroupMode', 'name_dose', 'dt_hr', dt_hr);
+        if isempty(facetLevels)
+            facetLevels = find_treatments_by_tokens(pmd, {''}, ...
+                'Fields', facetFields, 'GroupMode', 'name_dose', 'dt_hr', dt_hr);
+        end
+        
+        % Build group levels (Split by Name + Dose)
+        groupLevelsAll = find_treatments_by_tokens(pmd, p.groupby, ...
+            'Fields', groupFields, 'GroupMode', 'name_dose', 'dt_hr', dt_hr);
+        if isempty(groupLevelsAll)
+            groupLevelsAll = find_treatments_by_tokens(pmd, {''}, ...
+                'Fields', groupFields, 'GroupMode', 'name_dose', 'dt_hr', dt_hr);
+        end
+        
+        % Optional exclusion
+        if ~isempty(p.exclude)
+            exTokens = lower(cellstr(p.exclude));
+            facetLevels    = filter_levels_excluding_tokens(facetLevels,    exTokens, pmd);
+            groupLevelsAll = filter_levels_excluding_tokens(groupLevelsAll, exTokens, pmd);
+        end
+        
+        if isempty(facetLevels)
+            warning('[custom] No facets found after filtering. Nothing to plot.');
+            return;
+        end
+        
+        % === One figure per Cell ===
+        if isfield(p, 'splitpercell') && p.splitpercell
+            cellNames = fieldnames(idx);
+            if isempty(cellNames), cellNames = {'All'}; end
+        else
+            cellNames = {'All'};
+        end
+        
+        allXYwithData = find(goodxy);
+        facetLevels_allCells    = facetLevels;
+        groupLevelsAll_allCells = groupLevelsAll;
+        
+        for iCell = 1:numel(cellNames)
+            cellName = cellNames{iCell};
+            if strcmp(cellName, 'All')
+                cellXY = allXYwithData(:).';
+            else
+                cellXY = intersect(idx.(cellName)(:).', allXYwithData(:).');
+            end
+            
+            if isempty(cellXY), continue; end
+            
+            % Filter facet/group levels to this Cell’s XYs
+            facetLevels_cell = facetLevels_allCells;
+            for k = numel(facetLevels_cell):-1:1
+                facetLevels_cell(k).xys = intersect(facetLevels_cell(k).xys, cellXY);
+                if isempty(facetLevels_cell(k).xys), facetLevels_cell(k) = []; end
+            end
+            if isempty(facetLevels_cell), continue; end
+            
+            groupLevelsAll_cell = groupLevelsAll_allCells;
+            for k = numel(groupLevelsAll_cell):-1:1
+                groupLevelsAll_cell(k).xys = intersect(groupLevelsAll_cell(k).xys, cellXY);
+                if isempty(groupLevelsAll_cell(k).xys), groupLevelsAll_cell(k) = []; end
+            end
+            
+            facetLevels    = facetLevels_cell;
+            groupLevelsAll = groupLevelsAll_cell;
+            
+            % After facetLevels / groupLevelsAll have been built & filtered:
+            globalTx_hr = infer_global_tx_time(facetLevels, groupLevelsAll)-dt_hr;
+
+            % === One figure per channel/sensor ===
+            for iChan = 1:numel(p.channel)
+                p_this = p;
+                p_this.channel = char(p.channel{iChan});
+                
+                % Attach Tx info for alignment + vertical line
+                if ~isempty(globalTx_hr) && ~isnan(globalTx_hr)
+                    p_this.Tx = globalTx_hr;
+                    p_this.tx_lines = struct( ...
+                        't',     globalTx_hr, ...
+                        'color', [0 0 0], ...
+                        'style', '--', ...
+                        'label', 'Tx1');
+                else
+                    % No timing info → remove any stale tx fields
+                    if isfield(p_this,'Tx'),       p_this = rmfield(p_this,'Tx'); end
+                    if isfield(p_this,'tx_lines'), p_this = rmfield(p_this,'tx_lines'); end
+                end
+                
+                % Dynamic Layout Calculation
+                nF    = numel(facetLevels);
+                nCols = max(3, ceil(sqrt(nF))); 
+                nRows = ceil(nF / nCols);
+                tileW = 3.5; tileH = 2.5; 
+                W = min(20, tileW * nCols + 1);
+                H = tileH * nRows + 1;
+                
+                fig = figure('Color','w', ...
+                    'Name', ['Channel: ', p_this.channel, ' | Cell: ', char(string(cellName))], ...
+                    'Units','inches', 'Position', [1 1 W H]);
+                tl  = tiledlayout(nRows, nCols, 'TileSpacing', 'compact', 'Padding', 'compact');
+                
+                title_text = sprintf('Sensor: %s | Cell: %s', char(string(p_this.channel)), char(string(cellName)));
+                sgtitle(tl, title_text, 'Interpreter', 'none');
+                
+                % Prepare storage
+                pooledHandles = gobjects(0);
+                pooledLabels  = {};
+                axLast = [];
+                axList = gobjects(0); % Keep track of all axes created
+                
+                % --- LOOP THROUGH FACETS ---
+                for f = 1:numel(facetLevels)
+                    axCurrent = nexttile;
+                    axList(end+1) = axCurrent; %#ok<AGROW>
+                    
+                    facetXY   = facetLevels(f).xys;
+                    facetName = facetLevels(f).title;
+                    
+                    groupLevels = struct('title', {}, 'xys', {});
+                    for g = 1:numel(groupLevelsAll)
+                        xyg = intersect(facetXY, groupLevelsAll(g).xys);
+                        if ~isempty(xyg)
+                            groupLevels(end+1).title = groupLevelsAll(g).title; %#ok<AGROW>
+                            groupLevels(end).xys     = xyg;
+                        end
+                    end
+                    
+                    if isempty(groupLevels)
+                        title(facetName, 'Interpreter', 'none'); 
+                        axis off; continue; 
+                    end
+                    
+                    % Plot
+                    [hOut, lblOut, anyPlotted] = main_plotting(dataloc.d, p_this, facetName, ...
+                        {groupLevels.title}, {groupLevels.xys});
+                        
+                    title(facetName, 'Interpreter', 'none', 'FontSize', 10);
+                    
+                    if anyPlotted
+                        axLast = gca;
+                        pooledHandles = [pooledHandles, hOut(:)']; %#ok<AGROW>
+                        pooledLabels  = [pooledLabels,  lblOut(:)']; %#ok<AGROW>
+                    end
+                end
+                
+                xlabel(tl, 'Time (hours)');
+                ylabel(tl, 'Activity');
+                
+                % --- UNIFY AXES (with optional hard override)
+                if ~isempty(p.ylims)
+                    % User-specified hard y-limits
+                    linkaxes(axList,'y');
+                    ylim(axList(1), p.ylims);
+                else
+                    % Auto: compute limits from all tiles
+                    globalYMin = inf; globalYMax = -inf;
+                    hasData = false;
+                
+                    for iax = 1:numel(axList)
+                        if isgraphics(axList(iax)) && ~isempty(get(axList(iax),'Children'))
+                            yl = ylim(axList(iax));
+                            globalYMin = min(globalYMin, yl(1));
+                            globalYMax = max(globalYMax, yl(2));
+                            hasData = true;
+                        end
+                    end
+                
+                    if hasData && isfinite(globalYMin) && isfinite(globalYMax)
+                        rng = globalYMax - globalYMin;
+                        if rng == 0, rng = 1; end
+                        finalY = [globalYMin - 0.01*rng, globalYMax + 0.01*rng];
+                
+                        linkaxes(axList,'y');
+                        ylim(axList(1), finalY);
+                    end
+                end
+
+                % --- Shared Legend ---
+                if ~isempty(pooledHandles) && isgraphics(axLast)
+                    [~, ia] = unique(lower(string(pooledLabels)), 'stable');
+                    lgd = legend(axLast, pooledHandles(ia), pooledLabels(ia), ...
+                        'Orientation', 'vertical', 'NumColumns', 1);
+                    lgd.Layout.Tile = 'east';
+                end
+                
+                % Save Logic
+                fname = sprintf('%s_%s', p_this.channel, cellName);
+                fname = regexprep(fname, '[^a-zA-Z0-9]', '_');
+                saveDir = fullfile(pwd, 'figures');
+                if ~exist(saveDir,'dir'), mkdir(saveDir); end
+                saveas(fig, fullfile(saveDir, [fname '.svg']));
+                
+            end % iChan
+        end % iCell
+        
+    case 'composite'
+        pmd = dataloc.platemapd.pmd;
+        dt_hr = [];
+        if isfield(p, 'looptime') && ~isempty(p.looptime) && p.looptime > 0
+            dt_hr = p.looptime/60;
+        end
+        facetFields = resolve_fieldset_for(pmd, p.facetby, {'pTx'});
+        if p.debug
+            fprintf('[DBG][composite] Field detection → Facets: {%s}\n', strjoin(facetFields, ', '));
+        end
+        facetLevels = find_treatments_by_tokens(pmd, p.facetby, ...
+            'Fields', facetFields, 'GroupMode', 'name_dose', 'dt_hr', dt_hr);
+        if isempty(facetLevels)
+            facetLevels = find_treatments_by_tokens(pmd, {''}, ...
+                'Fields', facetFields, 'GroupMode', 'name_dose', 'dt_hr', dt_hr);
+        end
+        if ~isempty(p.exclude)
+            exTokens = lower(cellstr(p.exclude));
+            facetLevels = filter_levels_excluding_tokens(facetLevels, exTokens, pmd);
+        end
+        % Composite logic omitted…
+        if p.debug, fprintf('Composite plotting initialization complete.\n'); end
+        
+    otherwise
+        error('Unknown or unimplemented plotby argument: %s', plotby);
+end % switch plotby
+
+end % function
+
+%% Helper Functions
+function str = safe_str(C, r, c, idx)
+    % Safely extract string from cell array C at {r,c}, index idx
+    str = '';
+    try 
+        val = C{r,c,idx}; 
+        if ischar(val) || isstring(val), str = char(val); end
+    catch
+    end
+end
+
+function fields = resolve_fieldset_for(pmd, requested, defaults)
+    % Helper to determine which fields (Tx1, Tx2, pTx) to use
+    fields = {};
+    requested = cellstr(requested);
+    defaults  = cellstr(defaults);
+    
+    % 1. Try requested fields
+    for i = 1:numel(requested)
+        if ~isempty(requested{i}) && isfield(pmd, requested{i})
+            fields{end+1} = requested{i}; %#ok<AGROW>
+        end
+    end
+    
+    % 2. If no requested fields found, try defaults
+    if isempty(fields)
+        for i = 1:numel(defaults)
+            if isfield(pmd, defaults{i})
+                fields{end+1} = defaults{i}; %#ok<AGROW>
+            end
+        end
+    end
+end
+
+function levels = find_treatments_by_tokens(pmd, tokens, varargin)
+    % Split groups by Dose/Unit AND capture approximate treatment time
+    
+    ip = inputParser;
+    addParameter(ip, 'Fields', {'Tx1','Tx2','pTx'});
+    addParameter(ip, 'GroupMode', 'name_dose'); 
+    addParameter(ip, 'dt_hr', 1);  % hours per frame (for 'tp' etc)
+    parse(ip, varargin{:});
+    searchFields = ip.Results.Fields;
+    dt_hr       = ip.Results.dt_hr;
+    
+    tokens = cellstr(tokens);
+    groupsMap = containers.Map(); 
+    
+    [R, C] = size(pmd.xy);
+    
+    for t = 1:numel(tokens)
+        tok = tokens{t};
+        if isempty(tok), continue; end
+        
+        for f = 1:numel(searchFields)
+            fname = searchFields{f};
+            if ~isfield(pmd, fname), continue; end
+            
+            data = pmd.(fname); 
+            
+            for r = 1:R
+                for c = 1:C
+                    nameVal = safe_str(data, r, c, 1);
+                    if isempty(nameVal), continue; end
+                    
+                    if contains(lower(nameVal), lower(tok))
+                        [dose, unit] = read_dose_unit(data, r, c);     
+                        % Only Tx1/Tx2 have real time info; pTx's 4th slice is log-dose
+                        if strcmp(fname,'Tx1') || strcmp(fname,'Tx2')
+                            [time_hr, t_raw, tunit] = read_time_unit(data, r, c, dt_hr);
+                        else
+                            time_hr = NaN;
+                            t_raw   = NaN;
+                            tunit   = '';
+                        end
+                                           
+                        % Use name + dose as the group key
+                        if isnan(dose)
+                            uniqueKey = sprintf('%s_NaN_%s', nameVal, unit);
+                            dispName  = nameVal;
+                            sortVal   = -1;
+                        else
+                            uniqueKey = sprintf('%s_%.6f_%s', nameVal, dose, unit);
+                            dispName  = sprintf('%s %.2g %s', ...
+                                prettify_token(nameVal), dose, unit);
+                            sortVal   = dose;
+                        end
+                        
+                        xy_here = pmd.xy{r,c};
+                        if isempty(xy_here), continue; end
+                        
+                        if isKey(groupsMap, uniqueKey)
+                            entry = groupsMap(uniqueKey);
+                            entry.xys = [entry.xys, xy_here];
+                            if ~isnan(time_hr)
+                                entry.times_hr(end+1) = time_hr; %#ok<AGROW>
+                            end
+                            groupsMap(uniqueKey) = entry;
+                        else
+                            entry.title    = dispName;
+                            entry.xys      = xy_here;
+                            entry.dose     = sortVal;
+                            entry.token    = tok; 
+                            if ~isnan(time_hr)
+                                entry.times_hr = time_hr;
+                            else
+                                entry.times_hr = [];
+                            end
+                            entry.t_raw  = t_raw;
+                            entry.tunit  = tunit;
+                            groupsMap(uniqueKey) = entry;
+                        end
+                    end
+                end
+            end
+        end
+    end
+    
+    keys = groupsMap.keys;
+    if isempty(keys)
+        levels = struct('title', {}, 'xys', {});
+        return;
+    end
+    
+    % Output struct
+    levels = repmat(struct( ...
+        'title','', 'xys',[], 'dose',0, 'token','', ...
+        'time_hr',NaN, 't_raw',NaN, 'tunit',''), 1, numel(keys));
+    
+    for k = 1:numel(keys)
+        entry = groupsMap(keys{k});
+        entry.xys = unique(entry.xys);
+        
+        if isfield(entry, 'times_hr') && ~isempty(entry.times_hr)
+            entry.time_hr = min(entry.times_hr);   % earliest treatment
+        else
+            entry.time_hr = NaN;
+        end
+        
+        levels(k).title   = entry.title;
+        levels(k).xys     = entry.xys;
+        levels(k).dose    = entry.dose;
+        levels(k).token   = entry.token;
+        levels(k).time_hr = entry.time_hr;
+        if isfield(entry,'t_raw'),  levels(k).t_raw  = entry.t_raw;  end
+        if isfield(entry,'tunit'),  levels(k).tunit  = entry.tunit;  end
+    end
+    
+    [~, sortIdx] = sortrows(struct2table(levels), {'token', 'dose'});
+    levels = levels(sortIdx);
+end
+
+function levels = filter_levels_excluding_tokens(levels, exTokens, ~)
+    % Removes XYs or whole levels if they match exclusion tokens
+    if isempty(levels) || isempty(exTokens), return; end
+    
+    keepMask = true(size(levels));
+    for i = 1:numel(levels)
+        for e = 1:numel(exTokens)
+            if contains(lower(levels(i).title), lower(exTokens{e}))
+                keepMask(i) = false;
+            end
+        end
+    end
+    levels = levels(keepMask);
+end
+
+function fname = sanitize_filename(str)
+    fname = regexprep(str, '[^a-zA-Z0-9_\-]', '');
+    fname = regexprep(fname, '_+', '_');
+end
+
+function token = prettify_token(str)
+    token = strrep(str, '_', ' ');
+end
+
+function [dose, unit] = read_dose_unit(A, r, c)
+    dose = NaN; unit = '';
+    try
+        d = A{r,c,2};
+        if isnumeric(d), dose = d; 
+        elseif ischar(d), dose = str2double(d); end
+        
+        u = A{r,c,3};
+        if ischar(u), unit = u; end
+    catch
+    end
+end
+
+function [time_hr, t_raw, unit] = read_time_unit(A, r, c, dt_hr)
+    % Reads treatment time (idx 4) and time unit (idx 5), converts to hours.
+    % For your platemap:
+    %   - index 4: time (e.g. '55')
+    %   - index 5: unit (e.g. 'tp' for frame/TP)
+    
+    time_hr = NaN;
+    t_raw   = NaN;
+    unit    = '';
+    
+    if nargin < 4 || isempty(dt_hr), dt_hr = 1; end
+    
+    try
+        % Raw time value
+        if size(A,3) >= 4
+            val = A{r,c,4};
+        else
+            val = [];
+        end
+        
+        if isnumeric(val)
+            t_raw = val;
+        elseif ischar(val) || isstring(val)
+            t_raw = str2double(val);
+        end
+        
+        % Unit string
+        if size(A,3) >= 5
+            u = A{r,c,5};
+            if ischar(u) || isstring(u)
+                unit = char(u);
+            end
+        end
+        
+        if isnan(t_raw)
+            return;
+        end
+        
+        uLower = lower(strtrim(unit));
+        switch uLower
+            case {'h','hr','hrs','hour','hours'}
+                % Already in hours
+                time_hr = t_raw;
+            case {'tp','frame','frames'}
+                % Frames / timepoints → hours
+                time_hr = t_raw * dt_hr;
+            otherwise
+                % Fallback: if dt_hr ~= 1, assume frames; otherwise hours
+                if ~isempty(dt_hr) && dt_hr ~= 1
+                    time_hr = t_raw * dt_hr;
+                else
+                    time_hr = t_raw;
+                end
+        end
+    catch
+        % leave as NaN
+    end
+end
+
+function t0 = infer_global_tx_time(facetLevels, groupLevelsAll)
+    times = [];
+
+    % 1) Prefer facet times (these are usually Tx1 / Oligo / Vehicle)
+    if ~isempty(facetLevels) && isfield(facetLevels, 'time_hr')
+        t = [facetLevels.time_hr];
+        times = [times, t(~isnan(t))];
+    end
+
+    % 2) Optional fallback: use group times *only if facet has none*
+    if isempty(times) && ~isempty(groupLevelsAll) && isfield(groupLevelsAll, 'time_hr')
+        t = [groupLevelsAll.time_hr];
+        times = [times, t(~isnan(t))];
+    end
+
+    % 3) Strip any negative/zero "times"
+    times = times(times > 0);
+
+    if isempty(times)
+        t0 = [];
+    else
+        t0 = min(times);  % earliest positive treatment time
+    end
+end
+
+
+function [hOut, lblOut, anyPlotted] = main_plotting(subdata, p, facetName, grpLabels, grpXYs)
+    % Plots traces with shaded error bars (std/sem/iqr)
+    % ALIGNS TIME: Time 0 = Time of First Treatment (if available)
+    
+    hOut = []; lblOut = {}; anyPlotted = false;
+    hold on;
+    
+    colors = lines(numel(grpLabels));
+    
+    % --- 1. Determine Time Offset (Alignment) ---
+    t_zero_offset = 0;
+
+    % Align 0 to first treatment time if available
+    if isfield(p, 'tx_lines') && ~isempty(p.tx_lines)
+        all_times = [p.tx_lines.t];
+        all_times = all_times(isfinite(all_times));
+        if ~isempty(all_times)
+            t_zero_offset = min(all_times);
+        end
+
+    elseif isfield(p, 'Tx') && ~isempty(p.Tx)
+        t_zero_offset = p.Tx(1);
+    end
+
+    % --- 2. Loop through Groups and Plot ---
+    for g = 1:numel(grpLabels)
+        xys = grpXYs{g};
+        traces = [];
+        for x = xys
+            if x <= numel(subdata) && ~isempty(subdata{x}) && ...
+                    isfield(subdata{x}.data, p.channel)
+                d = subdata{x}.data.(p.channel);
+                if ~isempty(d)
+                    traces = [traces; d]; %#ok<AGROW>
+                end
+            end
+        end
+        % === Default x-limits: based on t_axis, optionally clipped by tbeforetx / tmaxaftertx ===
+        if exist('t_axis','var') && ~isempty(t_axis)
+            xmin = min(t_axis);
+            xmax = max(t_axis);
+    
+            % tbeforetx / tmaxaftertx are in FRAMES (converted earlier), convert back to hours
+            if isfield(p,'tbeforetx') && ~isempty(p.tbeforetx)
+                tbefore_hr = p.tbeforetx * (p.looptime/60);
+                xmin = max(xmin, -tbefore_hr);
+            end
+            if isfield(p,'tmaxaftertx') && ~isempty(p.tmaxaftertx)
+                tafter_hr = p.tmaxaftertx * (p.looptime/60);
+                xmax = min(xmax, tafter_hr);
+            end
+    
+            xlim([xmin xmax]);
+        end
+        if isempty(traces), continue; end
+        
+        mu = mean(traces, 1, 'omitnan');
+        
+        switch lower(p.errortype)
+            case {'std'}
+                sigma = std(traces, 0, 1, 'omitnan');
+            case {'sem'}
+                sigma = std(traces, 0, 1, 'omitnan') ./ sqrt(sum(~isnan(traces),1));
+            case {'ci'}
+                sem = std(traces, 0, 1, 'omitnan') ./ sqrt(sum(~isnan(traces),1));
+                sigma = 1.96 * sem;
+            case {'iqr', '75-25'}
+                pct_vals = prctile(traces, [25 75], 1);                
+                mu = mean(traces, 1, 'omitnan');
+                sigma = [mu - pct_vals(1,:); pct_vals(2,:) - mu];
+            otherwise
+                sigma = zeros(size(mu));
+        end
+        
+        t_raw_hours = (0:size(mu,2)-1) * (p.looptime/60);
+        t_axis = t_raw_hours - t_zero_offset; 
+        
+        if any(sigma(:) > 0)
+            if size(sigma, 1) == 2
+                curve1 = mu + sigma(2, :); % Upper bound
+                curve2 = mu - sigma(1, :); % Lower bound
+            else
+                curve1 = mu + sigma;
+                curve2 = mu - sigma;
+            end
+            
+            x_poly = [t_axis, fliplr(t_axis)];
+            y_poly = [curve1, fliplr(curve2)];
+            
+            bad = isnan(x_poly) | isnan(y_poly);
+            x_poly(bad) = []; y_poly(bad) = [];
+            
+            if ~isempty(x_poly)
+                fill(x_poly, y_poly, colors(g,:), ...
+                    'FaceAlpha', 0.2, 'EdgeColor', 'none', 'HandleVisibility', 'off');
+            end
+        end
+        
+        h = plot(t_axis, mu, 'Color', colors(g,:), 'LineWidth', 1.5);
+        hOut = [hOut, h]; %#ok<AGROW>
+        lblOut{end+1} = grpLabels{g}; %#ok<AGROW>
+        anyPlotted = true;
+    end
+    
+    % --- 4. Plot Vertical Treatment Lines ---
+    if anyPlotted && t_zero_offset > 0
+        xline(0, ':', 'LineWidth', 1, 'HandleVisibility', 'off');
+    end
+
+    if isfield(p, 'tx_lines') && ~isempty(p.tx_lines)
+        for itx = 1:numel(p.tx_lines)
+            tx = p.tx_lines(itx);
+            shifted_t = tx.t - t_zero_offset;
+            if abs(shifted_t) > 0.01 
+                xline(shifted_t, 'Color', tx.color, 'LineStyle', tx.style, ...
+                    'LineWidth', 1, 'HandleVisibility', 'off');
+            end
+            if isfield(p,'show_tx_labels') && p.show_tx_labels && ~isempty(tx.label)
+                 yl = ylim;
+                 text(shifted_t, yl(2)*0.95, tx.label, ...
+                     'VerticalAlignment','top', 'HorizontalAlignment','left');
+            end
+        end
+    end
+end

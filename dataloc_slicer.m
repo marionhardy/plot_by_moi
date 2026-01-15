@@ -1,0 +1,368 @@
+function dataloc2 = dataloc_slicer(dataloc, varargin)
+% dataloc_slicer  Keep only XY wells that match user-specified pTx / Tx filters,
+% and (optionally) keep only specific cell indices and/or timepoints.
+%
+% Examples:
+% dl2 = dataloc_slicer(dataloc, ...
+%   'pTxName','Glucose','pTxDose',17,'pTxUnit','mM', ...
+%   'txName','Oligo','txDose',0.05,'txUnit','uM','txField','any');
+%
+% dl2 = dataloc_slicer(dataloc, ...
+%   'pTxName','Glucose','pTxDose',17,'pTxUnit','mM', ...
+%   'txName','Oligo','txDose',0.05,'txUnit','uM', ...
+%   'nameMatch','exact','logic','and','debug',true, ...
+%   'Cells','1-5,8,10-12', 
+%   'tpRange',[1 360]);  % keep cells and first 360 tps
+
+    % ---- parse inputs ----
+    ip = inputParser; ip.CaseSensitive = false;
+    addParameter(ip,'Cells',[],@(x) ischar(x) || isstring(x) || isnumeric(x));
+    addParameter(ip,'tp',[],@(x) isnumeric(x) || islogical(x));
+    addParameter(ip,'tpRange',[],@(x) isnumeric(x) && numel(x)==2);
+    addParameter(ip,'pTxName','',@(x)ischar(x)||isstring(x));
+    addParameter(ip,'pTxDose',[],@(x)isempty(x)||isscalar(x));
+    addParameter(ip,'pTxUnit','',@(x)ischar(x)||isstring(x));
+    addParameter(ip,'txName','',@(x)ischar(x)||isstring(x));
+    addParameter(ip,'txDose',[],@(x)isempty(x)||isscalar(x));
+    addParameter(ip,'txUnit','',@(x)ischar(x)||isstring(x));
+    addParameter(ip,'txField','any',@(x)any(strcmpi(x,{'any','Tx1','Tx2'})));
+    addParameter(ip,'logic','and',@(x)any(strcmpi(x,{'and','or'})));
+    addParameter(ip,'nameMatch','contains',@(x)any(strcmpi(x,{'contains','exact'})));
+    addParameter(ip,'tol',1e-6,@(x)isnumeric(x)&&isscalar(x)&&x>0);
+    addParameter(ip,'debug',false,@islogical);
+    parse(ip,varargin{:});
+    P = ip.Results;
+
+    % ---- basic checks ----
+    if ~isfield(dataloc,'platemapd') || ~isfield(dataloc.platemapd,'pmd')
+        error('dataloc_slicer:input','Missing dataloc.platemapd.pmd');
+    end
+    pmd = dataloc.platemapd.pmd;
+    if ~isfield(pmd,'xy') || isempty(pmd.xy)
+        error('dataloc_slicer:platetable','Missing pmd.xy');
+    end
+    [R,C] = size(pmd.xy);
+
+    % normalize units
+    P.pTxUnit = norm_unit(P.pTxUnit);
+    P.txUnit  = norm_unit(P.txUnit);
+
+    % helpers for name matching
+    doContains = strcmpi(P.nameMatch,'contains');
+    ptxNameL = lower(char(string(P.pTxName)));
+    txNameL  = lower(char(string(P.txName)));
+
+    % which XYs exist → size to dataloc.d (safe)
+    nXY = numel(dataloc.d);
+    keepXY = false(1, nXY);
+
+    % ---- scan wells ----
+    for r = 1:R
+        for c = 1:C
+            xys = try_xy(pmd,r,c);
+            if isempty(xys), continue; end
+            xys = xys(xys>=1 & xys<=nXY); % guard
+
+            % pTx match
+            ok_pTx = isempty(P.pTxName); % empty filter means auto-pass
+            if ~ok_pTx
+                [nmP, doseP, unitP] = get_name_dose_unit(pmd,'pTx',r,c);
+                okName = false;
+                if ~isempty(nmP)
+                    nmL = lower(nmP);
+                    if doContains
+                        okName = contains(nmL, ptxNameL);
+                    else
+                        okName = strcmpi(nmP, char(string(P.pTxName)));
+                    end
+                end
+                okDose = true; % default pass if no dose specified
+                if ~isempty(P.pTxDose)
+                    okDose = dose_equal(doseP,unitP,P.pTxDose,P.pTxUnit,P.tol);
+                end
+                ok_pTx = okName && okDose;
+            end
+
+            % Tx match (Tx1/Tx2/both)
+            ok_Tx = isempty(P.txName); % empty filter means auto-pass
+            if ~ok_Tx
+                fieldsToCheck = pick_tx_fields(P.txField);
+                ok_Tx_local = false;
+                for fidx = 1:numel(fieldsToCheck)
+                    fld = fieldsToCheck{fidx};
+                    [nmT, doseT, unitT] = get_name_dose_unit(pmd,fld,r,c);
+                    if isempty(nmT), continue; end
+                    nmL = lower(nmT);
+
+                    okName = false;
+                    if doContains
+                        okName = contains(nmL, txNameL);
+                    else
+                        okName = strcmpi(nmT, char(string(P.txName)));
+                    end
+                    if ~okName, continue; end
+
+                    okDose = true;
+                    if ~isempty(P.txDose)
+                        okDose = dose_equal(doseT,unitT,P.txDose,P.txUnit,P.tol);
+                    end
+
+                    if okName && okDose
+                        ok_Tx_local = true;
+                        break;
+                    end
+                end
+                ok_Tx = ok_Tx_local;
+            end
+
+            % combine with logic
+            if strcmpi(P.logic,'and')
+                match = ok_pTx && ok_Tx;
+            else
+                match = ok_pTx || ok_Tx;
+            end
+
+            if match
+                keepXY(xys) = true;
+            end
+        end
+    end
+
+    % ---- build filtered copy (XY-level) ----
+    dataloc2 = dataloc;
+
+    for xy = 1:nXY
+        if ~keepXY(xy)
+            dataloc2.d{xy} = [];
+        end
+    end
+
+    for r = 1:R
+        for c = 1:C
+            orig = try_xy(pmd,r,c);
+            if isempty(orig), dataloc2.platemapd.pmd.xy{r,c} = []; continue; end
+            dataloc2.platemapd.pmd.xy{r,c} = intersect(orig, find(keepXY));
+        end
+    end
+
+    if P.debug
+        fprintf('[dataloc_slicer] Kept %d XY of %d\n', nnz(keepXY), nXY);
+    end
+
+    % ---- Optional cell subset across selected XYs ----
+    if ~isempty(P.Cells)
+        keepCells = parse_cell_list(P.Cells);
+        if ~isempty(keepCells)
+            for xy = 1:nXY
+                S = dataloc2.d{xy};
+                if isempty(S) || ~isstruct(S) || ~isfield(S,'cellindex') || isempty(S.cellindex)
+                    continue;
+                end
+
+                ci = S.cellindex(:);
+                rowMask = ismember(ci, keepCells);
+
+                if ~any(rowMask)
+                    % clear but keep structure consistent
+                    S.cellindex = [];
+                    if isfield(S,'data') && ~isempty(S.data)
+                        fns = fieldnames(S.data);
+                        for f = 1:numel(fns)
+                            M = S.data.(fns{f});
+                            if isnumeric(M) && ~isempty(M) && size(M,1)==numel(ci)
+                                S.data.(fns{f}) = M([],:);  % 0-by-T
+                            end
+                        end
+                    end
+                    dataloc2.d{xy} = S;
+                    continue;
+                end
+
+                % subset channels by kept rows
+                if isfield(S,'data') && ~isempty(S.data)
+                    fns = fieldnames(S.data);
+                    for f = 1:numel(fns)
+                        M = S.data.(fns{f});
+                        if isnumeric(M) && ~isempty(M) && size(M,1)==numel(ci)
+                            S.data.(fns{f}) = M(rowMask, :);
+                        end
+                    end
+                end
+
+                S.cellindex = ci(rowMask);
+                dataloc2.d{xy} = S;
+            end
+        end
+    end
+
+    % ---- Optional timepoint subset across selected XYs ----
+    % Build the set of column indices to keep (1-based, inclusive).
+    tpKeep = [];
+    if ~isempty(P.tpRange)
+        a = max(1, floor(P.tpRange(1)));
+        b = floor(P.tpRange(2));
+        if isfinite(a) && isfinite(b) && b >= a
+            tpKeep = a:b;
+        end
+    end
+    if ~isempty(P.tp)
+        v = unique(floor(P.tp(:)')); v = v(isfinite(v) & v>0);
+        if isempty(tpKeep)
+            tpKeep = v;
+        else
+            tpKeep = intersect(tpKeep, v);
+        end
+    end
+
+    if ~isempty(tpKeep)
+        for xy = 1:nXY
+            S = dataloc2.d{xy};
+            if isempty(S) || ~isstruct(S) || ~isfield(S,'data') || isempty(S.data)
+                continue;
+            end
+            fns = fieldnames(S.data);
+            % Determine max T across numeric matrices to clamp indices
+            Tmax = 0;
+            for f = 1:numel(fns)
+                M = S.data.(fns{f});
+                if isnumeric(M) && ~isempty(M) && ndims(M)==2
+                    Tmax = max(Tmax, size(M,2));
+                end
+            end
+            if Tmax < 1, continue; end
+            keep = tpKeep(tpKeep>=1 & tpKeep<=Tmax);
+            if isempty(keep), keep = []; end  
+
+            % Apply to each numeric [cells x T] matrix
+            if exist('keep','var')
+                for f = 1:numel(fns)
+                    M = S.data.(fns{f});
+                    if isnumeric(M) && ~isempty(M) && ndims(M)==2
+                        if isempty(keep)
+                            % zero columns but preserve row count
+                            S.data.(fns{f}) = M(:, []);
+                        else
+                            S.data.(fns{f}) = M(:, keep);
+                        end
+                    end
+                end
+            end
+            dataloc2.d{xy} = S;
+        end
+
+        if P.debug
+            if numel(tpKeep) > 10
+                fprintf('[dataloc_slicer] Kept %d timepoints (showing first 10): %s ...\n', numel(tpKeep), mat2str(tpKeep(1:10)));
+            else
+                fprintf('[dataloc_slicer] Kept timepoints: %s\n', mat2str(tpKeep));
+            end
+        end
+    end
+end
+
+% ========= helpers =========
+
+function fields = pick_tx_fields(txField)
+    switch lower(txField)
+        case 'tx1', fields = {'Tx1'};
+        case 'tx2', fields = {'Tx2'};
+        otherwise,  fields = {'Tx1','Tx2'}; % 'any'
+    end
+end
+
+function xys = try_xy(pmd, r, c)
+    xys = [];
+    try
+        v = pmd.xy{r,c};
+        if isnumeric(v), xys = v(:).'; end
+    end
+end
+
+function [nm, dose, unit] = get_name_dose_unit(pmd, fieldname, r, c)
+    nm=''; dose=NaN; unit='';
+    if ~isfield(pmd,fieldname) || isempty(pmd.(fieldname)), return; end
+    A = pmd.(fieldname);
+    nm   = safe_str_slot(A,r,c,1);
+    dose = safe_num_slot(A,r,c,2);
+    unit = safe_str_slot(A,r,c,3);
+end
+
+function s = safe_str_slot(A,r,c,k)
+    s = '';
+    try
+        v = A{r,c,k};
+        if ischar(v)
+            s = strtrim(v);
+        elseif isstring(v)&&isscalar(v)
+            s = strtrim(char(v));
+        end
+    end
+end
+
+function x = safe_num_slot(A,r,c,k)
+    x = NaN;
+    try
+        v = A{r,c,k};
+        if isnumeric(v)&&isscalar(v)
+            x = v;
+        elseif ischar(v)
+            vv = str2double(strtrim(v)); if isfinite(vv), x = vv; end
+        elseif isstring(v)&&isscalar(v)
+            vv = str2double(strtrim(char(v))); if isfinite(vv), x = vv; end
+        end
+    end
+end
+
+function u = norm_unit(u)
+    u = lower(strrep(strrep(char(string(u)),'µ','u'),' ','')); 
+end
+
+function tf = dose_equal(doseA, unitA, doseB, unitB, tol)
+    if ~isfinite(doseA) || ~isfinite(doseB), tf = false; return; end
+    a = to_uM(doseA, unitA);
+    b = to_uM(doseB, unitB);
+    tf = isfinite(a) && isfinite(b) && abs(a-b) <= tol;
+end
+
+function y = to_uM(dose, unit)
+    if ~isfinite(dose), y = NaN; return; end
+    u = norm_unit(unit);
+    switch u
+        case {'um','micromolar'},        y = dose;
+        case {'mm','millimolar','mmol'}, y = dose*1000;    % mM -> µM
+        case {'nm','nanomolar'},         y = dose/1000;    % nM -> µM
+        case {'m','molar','mol'},        y = dose*1e6;     % M  -> µM
+        otherwise,                       y = dose;         % unknown -> assume µM
+    end
+end
+
+function ids = parse_cell_list(spec)
+% Accepts: '1-3,5,10-12' or numeric vector. Returns sorted unique row vector.
+    if isempty(spec)
+        ids = []; return;
+    end
+    if isnumeric(spec)
+        ids = unique(floor(spec(spec>0 & isfinite(spec))));
+        return;
+    end
+    s = strrep(char(spec),' ','');
+    if isempty(s), ids = []; return; end
+    parts = regexp(s,',','split');
+    out = [];
+    for k = 1:numel(parts)
+        tk = parts{k};
+        if isempty(tk), continue; end
+        m = regexp(tk,'^(\d+)-(\d+)$','tokens','once');
+        if ~isempty(m)
+            a = str2double(m{1}); b = str2double(m{2});
+            if isfinite(a) && isfinite(b)
+                if a<=b, out = [out, a:b]; else, out = [out, b:a]; end
+            end
+        else
+            v = str2double(tk);
+            if isfinite(v), out = [out, v]; end 
+        end
+    end
+    out = out(out>0 & isfinite(out));
+    ids = unique(floor(out));
+end
