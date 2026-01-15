@@ -4,48 +4,14 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
 %
 % NEW: per-row scaling (min-max or zscore) so each cell is visible.
 %
-% plot_osc_matrix(dataloc, chanName, dt, ...)
-%
-% Inputs:
-%   dataloc   : struct with .d{xy}.data.(chanName) and classification fields
-%   chanName  : sensor/channel name (e.g. 'HYLIGHT')
-%   dt        : sampling interval in minutes
-%
-% Name-value options:
-%   'xyInclude'  : vector or logical mask of xy indices (default: all)
-%
-% Sampling (PER CLASS):
-%   'maxNon'     : max # class-0 cells to plot (default 100)
-%   'maxMed'     : max # class-1 cells to plot (default 100)
-%   'maxHigh'    : max # class-2 cells to plot (default 100)
-%   'maxCells'   : convenience: set maxNon=maxMed=maxHigh=maxCells
-%
-% Class source:
-%   'useBinaryIfNoClass' : if oscClass missing, use isOsc (default true)
-%   'binaryOscAs'        : if using binary isOsc, map true->2 (high) or true->1 (med) (default 2)
-%
-% Peak raster options:
-%   'Pmin'       : minimum period of interest (hours), e.g. 2 (default: 2)
-%   'Pmax'       : maximum period of interest (hours), unused here (default: 6)
-%   'smoothHrs'  : smoothing window (hours) before peak detection (default: Pmin/4)
-%   'promFactor' : min peak prominence = promFactor * std(trace) (default: 0.5)
-%
-% Tx alignment + cropping:
-%   'alignToTx'  : true to align/crop around Tx1 (default true)
-%   'tPre'       : hours BEFORE Tx1 to include (default 4)
-%   'tPost'      : hours AFTER  Tx1 to include (default 12)
-%   'txField'    : platemap field used to define Tx time (default 'Tx1')
-%   'txSlice'    : slice within pmd.(txField) that stores time/tp (default 4)
-%
-% Row scaling :
-%   'rowscale'   : 'none' | 'minmax' | 'zscore' (default 'minmax')
-%   'clipZ'      : for zscore display, clip to +/- clipZ (default 3)
-%
 % Output:
-%   Figure with:
-%     Top:    heatmap of ROW-SCALED traces (cells x time), order:
-%               class0 (bottom) -> class1 (middle) -> class2 (top)
-%     Bottom: peak raster (1 = detected peak)
+%   Top:    heatmap of ROW-SCALED traces
+%   Bottom: peak raster
+%
+% Class meaning (recommended):
+%   0 = non-oscillatory
+%   1 = weak/medium oscillatory
+%   2 = strong/perfect oscillatory
 
     ip = inputParser; ip.CaseSensitive = false;
 
@@ -193,7 +159,7 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
                 TxFrame = 1;
             end
 
-            t0_hr = (TxFrame - 1) * dt_hours;
+            t0_hr  = (TxFrame - 1) * dt_hours;
             iStart = max(1, round((t0_hr - P.tPre)/dt_hours) + 1);
             iEnd   = min(Txy, round((t0_hr + P.tPost)/dt_hours) + 1);
 
@@ -213,14 +179,14 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
 
             switch cls(i)
                 case 0
-                    tr0{end+1} = tr;     
-                    len0(end+1) = effLen;  
+                    tr0{end+1} = tr;      %#ok<AGROW>
+                    len0(end+1) = effLen; %#ok<AGROW>
                 case 1
-                    tr1{end+1} = tr;      
-                    len1(end+1) = effLen;   
+                    tr1{end+1} = tr;      %#ok<AGROW>
+                    len1(end+1) = effLen; %#ok<AGROW>
                 case 2
-                    tr2{end+1} = tr;     
-                    len2(end+1) = effLen;  
+                    tr2{end+1} = tr;      %#ok<AGROW>
+                    len2(end+1) = effLen; %#ok<AGROW>
             end
         end
     end
@@ -248,10 +214,12 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
         tr2 = tr2(keep); len2 = len2(keep); n2 = numel(tr2);
     end
 
-    % ---- concatenate: class0 bottom -> class1 -> class2 top ----
+    % ---- concatenate (class0 -> class1 -> class2) ----
     traces = [tr0(:); tr1(:); tr2(:)];
+    clsAll = uint8([zeros(n0,1); ones(n1,1); 2*ones(n2,1)]);   % ✅ FIX: define clsAll here
     nCells = numel(traces);
 
+    % boundaries for separators (before clustering)
     b01 = n0 + 0.5;
     b12 = n0 + n1 + 0.5;
 
@@ -264,7 +232,7 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
     end
 
     % ---- ROW SCALING for display ----
-    Mdisp = Mraw; % default
+    Mdisp = Mraw;
     switch lower(P.rowscale)
         case 'none'
             % keep raw
@@ -273,41 +241,36 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
                 row = Mraw(i,:);
                 ok = isfinite(row);
                 if nnz(ok) < 2
-                    Mdisp(i,:) = NaN;
-                    continue;
+                    Mdisp(i,:) = NaN; continue;
                 end
-                mn = min(row(ok));
-                mx = max(row(ok));
+                mn = min(row(ok)); mx = max(row(ok));
                 if mx <= mn
-                    Mdisp(i,:) = NaN;
-                else
-                    row2 = row;
-                    row2(ok) = (row(ok) - mn) ./ (mx - mn);
-                    Mdisp(i,:) = row2;
+                    Mdisp(i,:) = NaN; continue;
                 end
+                row2 = row;
+                row2(ok) = (row(ok) - mn) ./ (mx - mn);
+                Mdisp(i,:) = row2;
             end
         case 'zscore'
             for i = 1:nCells
                 row = Mraw(i,:);
                 ok = isfinite(row);
                 if nnz(ok) < 3
-                    Mdisp(i,:) = NaN;
-                    continue;
+                    Mdisp(i,:) = NaN; continue;
                 end
                 mu = mean(row(ok));
                 sd = std(row(ok));
                 if sd == 0 || ~isfinite(sd)
-                    Mdisp(i,:) = NaN;
-                else
-                    row2 = row;
-                    row2(ok) = (row(ok) - mu) ./ sd;
-                    row2(ok) = max(-P.clipZ, min(P.clipZ, row2(ok)));
-                    Mdisp(i,:) = row2;
+                    Mdisp(i,:) = NaN; continue;
                 end
+                row2 = row;
+                row2(ok) = (row(ok) - mu) ./ sd;
+                row2(ok) = max(-P.clipZ, min(P.clipZ, row2(ok)));
+                Mdisp(i,:) = row2;
             end
     end
 
-    % ---- peak raster computed from (optionally) smoothed RAW, not scaled ----
+    % ---- peak raster computed from RAW (not scaled) ----
     Mpk = zeros(nCells, Tmax);
     minDistSamples = max(1, round(P.Pmin / dt_hours * 0.5));
     smoothSamples  = max(1, round(P.smoothHrs / dt_hours));
@@ -335,29 +298,29 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
         Mpk(i,locs) = 1;
     end
 
-    % --- keep class blocks but cluster within each block ---
+    % ---- cluster WITHIN each class using Mdisp (scaled) ----
     idx0 = find(clsAll==0);
     idx1 = find(clsAll==1);
     idx2 = find(clsAll==2);
-    
-    ord0 = idx0(cluster_order_rows(M(idx0,:)));
-    ord1 = idx1(cluster_order_rows(M(idx1,:)));
-    ord2 = idx2(cluster_order_rows(M(idx2,:)));
-    
+
+    ord0 = idx0(cluster_order_rows(Mdisp(idx0,:)));
+    ord1 = idx1(cluster_order_rows(Mdisp(idx1,:)));
+    ord2 = idx2(cluster_order_rows(Mdisp(idx2,:)));
+
     order = [ord0(:); ord1(:); ord2(:)];
-    
+
     % apply ordering everywhere
-    M      = M(order,:);
-    Mpk    = Mpk(order,:);
+    Mraw  = Mraw(order,:);
+    Mdisp = Mdisp(order,:);
+    Mpk   = Mpk(order,:);
     clsAll = clsAll(order);
-    
-    % boundaries for plotting horizontal separators
+
+    % boundaries remain counts-based (same class sizes)
     n0 = numel(ord0);
     n1 = numel(ord1);
     n2 = numel(ord2);
-    
-    b01 = n0 + 0.5;          % between 0 and 1
-    b12 = n0 + n1 + 0.5;     % between 1 and 2
+    b01 = n0 + 0.5;
+    b12 = n0 + n1 + 0.5;
 
     % ---- time axis ----
     if P.alignToTx
@@ -377,16 +340,14 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
     set(gca,'YDir','normal');
     colormap(gca, parula);
     colorbar;
-    ylabel('cells (class0 bottom → class2 top)');
-    title(sprintf('%s (rowscale=%s)', chanName, lower(P.rowscale)));
+    ylabel('cells (0 bottom → 2 top)');
     xlim([th(1) th(end)]);
     hold on;
     if n0>0 && (n1>0 || n2>0), plot([th(1) th(end)], [b01 b01], 'k-', 'LineWidth', 1.2); end
     if n1>0 && n2>0,           plot([th(1) th(end)], [b12 b12], 'k-', 'LineWidth', 1.2); end
     if P.alignToTx, xline(0,'k-','LineWidth',1); end
-    title(sprintf('%s (0=non, 1=weak, 2=strong)', chanName))
-
     hold off; box on;
+    title(sprintf('%s (0=non, 1=weak, 2=strong)  rowscale=%s', chanName, lower(P.rowscale)));
 
     subplot(2,1,2);
     imagesc(th, 1:nCells, Mpk);
@@ -406,7 +367,7 @@ end
 
 
 function ordLocal = cluster_order_rows(Min)
-% Min is [n x T], should be row-scaled already (min-max or zscore)
+% Min is [n x T], should be row-scaled already.
 % Returns permutation indices 1..n that makes similar rows adjacent.
 
     n = size(Min,1);
@@ -415,19 +376,16 @@ function ordLocal = cluster_order_rows(Min)
         return;
     end
 
-    % Fill NaNs so pdist works (since you already time-windowed, NaNs should be rare)
     X = Min;
     X(~isfinite(X)) = 0;
 
-    % Correlation distance = "shape similarity"
-    D = pdist(X, 'correlation');     % requires Statistics & ML Toolbox
+    D = pdist(X, 'correlation');
     Z = linkage(D, 'average');
 
-    % This makes the dendrogram order look much nicer in a heatmap
     try
         ordLocal = optimalleaforder(Z, D);
     catch
         % fallback if optimalleaforder not available
-        [~, ordLocal] = sort(X(:,1)); % weak fallback but avoids crashing
+        [~, ordLocal] = sort(X(:,1));
     end
 end
