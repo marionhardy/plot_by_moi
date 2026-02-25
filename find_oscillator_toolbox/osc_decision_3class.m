@@ -10,7 +10,7 @@ function [oscClass, oscScore, isOsc] = osc_decision_3class(feat, params, varargi
 %   oscScore: 0..1 (confidence-ish)
 %   isOsc   : binary (oscClass>=1)
 
-p.ScoreCuts   = [0.45 0.75];   % [mediumCut, highCut]
+p.ScoreCuts   = [0.75 0.95];   % [mediumCut, highCut]
 p.Margins     = struct('bandFrac',0.25,'amp',0.25,'cvIPI',0.25); % fractional margins
 p.Weights     = [0.45 0.35 0.20]; % bandFrac, amp, cvIPI
 

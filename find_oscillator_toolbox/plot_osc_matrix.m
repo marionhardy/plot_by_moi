@@ -2,7 +2,12 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
 % plot_osc_matrix  Bulk view of traces by oscillation class (0/1/2),
 % with Tx-alignment + cropping, plus peak raster.
 %
-% NEW: per-row scaling (min-max or zscore) so each cell is visible.
+% DEFAULT BEHAVIOR (updated):
+%   - Prioritize FULL-window traces (i.e., traces that cover the entire requested
+%     crop window [tPre, tPost] around Tx, or the full XY trace if not aligning).
+%   - If not enough full traces to hit maxNon/maxMed/maxHigh, backfill with the
+%     LONGEST-AVAILABLE partial traces.
+%   - Still requires minimum finite content and a finite-fraction criterion.
 %
 % Output:
 %   Top:    heatmap of ROW-SCALED traces
@@ -16,6 +21,7 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
     ip = inputParser; ip.CaseSensitive = false;
 
     addParameter(ip,'xyInclude',[],@(x)isnumeric(x) || islogical(x));
+    addParameter(ip,'classChan',chanName,@(s)ischar(s)||isstring(s));
 
     % per-class caps
     addParameter(ip,'maxNon',100,@(x)isnumeric(x)&&isscalar(x)&&x>0);
@@ -59,6 +65,12 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
         P.smoothHrs = P.Pmin/4;
     end
 
+    classChan = string(P.classChan);
+
+    % ---- defaults for "full-first then longest partial" filtering ----
+    minPts = 5;
+    minFiniteFrac = 0.90;   % require >= 90% finite points within the extracted window
+
     % ---- XY mask ----
     nXY = numel(dataloc.d);
     if isempty(P.xyInclude)
@@ -88,10 +100,14 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
         xyGrid = [];
     end
 
-    % ---- collect traces by class (cropped if requested) ----
-    tr0 = {}; tr1 = {}; tr2 = {};
-    len0 = []; len1 = []; len2 = [];
-    Tmax = 0;
+    % ---- collect traces by class: FULL-window first, then LONGEST partial ----
+    tr0_full = {}; tr1_full = {}; tr2_full = {};
+    tr0_part = {}; tr1_part = {}; tr2_part = {};
+    len0_full = []; len1_full = []; len2_full = [];
+    len0_part = []; len1_part = []; len2_part = [];
+
+    TmaxWanted = 0;   % desired window length (max over XYs of wantLen)
+    TmaxSeen   = 0;   % max actual extracted length seen (for partial-only scenarios)
 
     for xy = 1:nXY
         if ~xyMask(xy), continue; end
@@ -100,7 +116,7 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
         if isempty(S) || ~isstruct(S) || ~isfield(S,'data') || ~isfield(S.data, chanName)
             continue;
         end
-        if ~isfield(S,'osc') || ~isfield(S.osc, chanName)
+        if ~isfield(S,'osc') || ~isfield(S.osc, classChan)
             continue;
         end
 
@@ -111,11 +127,11 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
         [nCellsXY, Txy] = size(X);
 
         % ---- class vector ----
-        hasClass = isfield(S.osc.(chanName),'oscClass');
-        hasBin   = isfield(S.osc.(chanName),'isOsc');
+        hasClass = isfield(S.osc.(classChan),'oscClass');
+        hasBin   = isfield(S.osc.(classChan),'isOsc');
 
         if hasClass
-            cls = uint8(S.osc.(chanName).oscClass(:));
+            cls = uint8(S.osc.(classChan).oscClass(:));
         elseif P.useBinaryIfNoClass && hasBin
             isOsc = logical(S.osc.(chanName).isOsc(:));
             cls = zeros(size(isOsc), 'uint8');
@@ -129,9 +145,7 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
             continue;
         end
 
-        % ---- crop window ----
-        iStart = 1; iEnd = Txy;
-
+        % ---- desired crop window for this XY ----
         if P.alignToTx
             TxFrame = 1; % fallback
             if hasPMD && isfield(pmd, char(P.txField))
@@ -154,42 +168,74 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
                 catch
                 end
             end
-
             if isempty(TxFrame) || ~isfinite(TxFrame) || TxFrame < 1
                 TxFrame = 1;
             end
 
-            t0_hr  = (TxFrame - 1) * dt_hours;
-            iStart = max(1, round((t0_hr - P.tPre)/dt_hours) + 1);
-            iEnd   = min(Txy, round((t0_hr + P.tPost)/dt_hours) + 1);
-
-            if iEnd <= iStart
-                continue;
-            end
+            t0_hr    = (TxFrame - 1) * dt_hours;
+            iStart   = max(1, round((t0_hr - P.tPre)/dt_hours) + 1);
+            iEndWant = round((t0_hr + P.tPost)/dt_hours) + 1;
+        else
+            iStart   = 1;
+            iEndWant = Txy;
         end
 
-        cropLen = iEnd - iStart + 1;
-        Tmax = max(Tmax, cropLen);
+        if iEndWant <= iStart
+            continue;
+        end
+
+        wantLen = iEndWant - iStart + 1;
+        TmaxWanted = max(TmaxWanted, wantLen);
+
+        % If the XY can't even reach iStart, skip
+        if Txy < iStart
+            continue;
+        end
+
+        % ---- per-cell extraction with full-first logic ----
+        isFullXY = (Txy >= iEndWant);
+        iEndAvail = min(Txy, iEndWant);
+        availLenXY = iEndAvail - iStart + 1;
+        TmaxSeen = max(TmaxSeen, availLenXY);
 
         for i = 1:nCellsXY
-            tr = X(i, iStart:iEnd);
-            if all(~isfinite(tr)), continue; end
-            effLen = sum(isfinite(tr));
-            if effLen < 5, continue; end
+            tr = X(i, iStart:iEndAvail);
+
+            ok = isfinite(tr);
+            if nnz(ok) < minPts
+                continue;
+            end
+            if nnz(ok) < minFiniteFrac * numel(tr)
+                continue;
+            end
 
             switch cls(i)
                 case 0
-                    tr0{end+1} = tr;      %#ok<AGROW>
-                    len0(end+1) = effLen; %#ok<AGROW>
+                    if isFullXY
+                        tr0_full{end+1} = tr; len0_full(end+1) = numel(tr); %#ok<AGROW>
+                    else
+                        tr0_part{end+1} = tr; len0_part(end+1) = numel(tr); %#ok<AGROW>
+                    end
                 case 1
-                    tr1{end+1} = tr;      %#ok<AGROW>
-                    len1(end+1) = effLen; %#ok<AGROW>
+                    if isFullXY
+                        tr1_full{end+1} = tr; len1_full(end+1) = numel(tr); %#ok<AGROW>
+                    else
+                        tr1_part{end+1} = tr; len1_part(end+1) = numel(tr); %#ok<AGROW>
+                    end
                 case 2
-                    tr2{end+1} = tr;      %#ok<AGROW>
-                    len2(end+1) = effLen; %#ok<AGROW>
+                    if isFullXY
+                        tr2_full{end+1} = tr; len2_full(end+1) = numel(tr); %#ok<AGROW>
+                    else
+                        tr2_part{end+1} = tr; len2_part(end+1) = numel(tr); %#ok<AGROW>
+                    end
             end
         end
     end
+
+    % ---- choose per-class: full first, then longest partial to fill cap ----
+    [tr0, len0] = local_take_pref_full(tr0_full, len0_full, tr0_part, len0_part, P.maxNon);
+    [tr1, len1] = local_take_pref_full(tr1_full, len1_full, tr1_part, len1_part, P.maxMed);
+    [tr2, len2] = local_take_pref_full(tr2_full, len2_full, tr2_part, len2_part, P.maxHigh);
 
     n0 = numel(tr0); n1 = numel(tr1); n2 = numel(tr2);
     if n0==0 && n1==0 && n2==0
@@ -197,26 +243,18 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
         return;
     end
 
-    % ---- subsample each class by longest ----
-    if n0 > P.maxNon
-        [~, ord] = sort(len0, 'descend');
-        keep = ord(1:P.maxNon);
-        tr0 = tr0(keep); len0 = len0(keep); n0 = numel(tr0);
-    end
-    if n1 > P.maxMed
-        [~, ord] = sort(len1, 'descend');
-        keep = ord(1:P.maxMed);
-        tr1 = tr1(keep); len1 = len1(keep); n1 = numel(tr1);
-    end
-    if n2 > P.maxHigh
-        [~, ord] = sort(len2, 'descend');
-        keep = ord(1:P.maxHigh);
-        tr2 = tr2(keep); len2 = len2(keep); n2 = numel(tr2);
+    % ---- decide final Tmax for display ----
+    % If we got any full-window traces at all, use TmaxWanted.
+    anyFull = ~isempty(tr0_full) || ~isempty(tr1_full) || ~isempty(tr2_full);
+    if anyFull
+        Tmax = TmaxWanted;
+    else
+        Tmax = max(1, TmaxSeen);
     end
 
     % ---- concatenate (class0 -> class1 -> class2) ----
     traces = [tr0(:); tr1(:); tr2(:)];
-    clsAll = uint8([zeros(n0,1); ones(n1,1); 2*ones(n2,1)]);   % ✅ FIX: define clsAll here
+    clsAll = uint8([zeros(n0,1); ones(n1,1); 2*ones(n2,1)]);
     nCells = numel(traces);
 
     % boundaries for separators (before clustering)
@@ -310,9 +348,9 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
     order = [ord0(:); ord1(:); ord2(:)];
 
     % apply ordering everywhere
-    Mraw  = Mraw(order,:);
-    Mdisp = Mdisp(order,:);
-    Mpk   = Mpk(order,:);
+    Mraw   = Mraw(order,:);
+    Mdisp  = Mdisp(order,:);
+    Mpk    = Mpk(order,:);
     clsAll = clsAll(order);
 
     % boundaries remain counts-based (same class sizes)
@@ -324,7 +362,12 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
 
     % ---- time axis ----
     if P.alignToTx
-        th = linspace(-P.tPre, P.tPost, Tmax);
+        % Use requested window if any full exists; otherwise use actual Tmax
+        if anyFull
+            th = linspace(-P.tPre, P.tPost, Tmax);
+        else
+            th = linspace(-P.tPre, -P.tPre + (Tmax-1)*dt_hours, Tmax);
+        end
         xlab = sprintf('time (h) relative to %s', char(P.txField));
     else
         th = (0:Tmax-1)*dt_hours;
@@ -337,10 +380,10 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
 
     subplot(2,1,1);
     imagesc(th, 1:nCells, Mdisp);
-    set(gca,'YDir','normal');
+    set(gca,'YDir','reverse');
     colormap(gca, parula);
     colorbar;
-    ylabel('cells (0 bottom → 2 top)');
+    ylabel('cells (0 bottom \rightarrow 2 top)');
     xlim([th(1) th(end)]);
     hold on;
     if n0>0 && (n1>0 || n2>0), plot([th(1) th(end)], [b01 b01], 'k-', 'LineWidth', 1.2); end
@@ -363,6 +406,42 @@ function plot_osc_matrix(dataloc, chanName, dt, varargin)
     if n1>0 && n2>0,           plot([th(1) th(end)], [b12 b12], 'r-', 'LineWidth', 1.2); end
     if P.alignToTx, xline(0,'r-','LineWidth',1); end
     hold off; box on;
+end
+
+
+function [trOut, lenOut] = local_take_pref_full(trF, lenF, trP, lenP, maxN)
+% Keep up to maxN. Prefer full-window traces first. If not enough, fill with
+% longest partial traces.
+
+    trOut = {};
+    lenOut = [];
+
+    % start with full traces
+    if ~isempty(trF)
+        trOut = trF(:);
+        lenOut = lenF(:);
+    end
+
+    % if too many full traces, trim (they're generally equal length, but be safe)
+    if numel(trOut) > maxN
+        [~, ord] = sort(lenOut, 'descend');
+        ord = ord(1:maxN);
+        trOut = trOut(ord);
+        lenOut = lenOut(ord);
+        return;
+    end
+
+    % fill remaining with longest partial
+    need = maxN - numel(trOut);
+    if need <= 0 || isempty(trP)
+        return;
+    end
+
+    [~, ordP] = sort(lenP(:), 'descend');
+    ordP = ordP(1:min(need, numel(ordP)));
+
+    trOut  = [trOut;  trP(ordP(:))];
+    lenOut = [lenOut; lenP(ordP(:))];
 end
 
 

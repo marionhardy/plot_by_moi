@@ -28,6 +28,8 @@ addParameter(ip, 'addstats', true, @islogical);
 addParameter(ip, 'addthreshline', true, @islogical);
 addParameter(ip, 'aftertreatment', 1, isNonNegScalar);
 addParameter(ip, 'analysischan', {'freq','durs'}, isCellStr);
+addParameter(ip, 'baseline', 'none', @(x) any(validatestring(lower(string(x)), ...
+    {'none','first_tp','first_non_nan','pre_tx_mean','dff_first','dff_pre_tx'})));
 addParameter(ip, 'channel', {'HYLIGHT'});
 addParameter(ip, 'cmap', 'lines', @(x) ischar(x) || isstring(x) || ...
     isa(x,'function_handle') || (isnumeric(x) && size(x,2)==3));
@@ -917,6 +919,59 @@ function [hOut, lblOut, anyPlotted] = main_plotting(subdata, p, facetName, grpLa
         end
         if isempty(traces), continue; end
         
+        % --- Baseline normalization (controllable) ---
+        mode = lower(string(p.baseline));
+        
+        % helper: get first non-NaN per row
+        firstNonNan = nan(size(traces,1),1);
+        for r = 1:size(traces,1)
+            j = find(~isnan(traces(r,:)), 1, 'first');
+            if ~isempty(j), firstNonNan(r) = traces(r,j); end
+        end
+        
+        % compute Tx frame index (1-based) if we have an offset
+        dt_hr = p.looptime/60;
+        txFrame = [];
+        if exist('t_zero_offset','var') && ~isempty(t_zero_offset) && isfinite(t_zero_offset)
+            txFrame = round(t_zero_offset/dt_hr) + 1;  % hours -> frame index
+        end
+        
+        switch mode
+            case "none"
+                % do nothing        
+            case "first_tp"
+                b = traces(:,1);
+                traces = traces - b;        
+            case "first_non_nan"
+                traces = traces - firstNonNan;     
+            case "pre_tx_mean"
+                % mean over [Tx - tmaxback, Tx-1]
+                if isempty(txFrame) || ~isfield(p,'tmaxback') || isempty(p.tmaxback)
+                    % fallback if tx not known
+                    traces = traces - firstNonNan;
+                else
+                    backFrames = max(1, round(p.tmaxback / dt_hr));   % p.tmaxback is in HOURS
+                    i1 = max(1, txFrame - backFrames);
+                    i2 = max(1, txFrame - 1);
+                    b = mean(traces(:, i1:i2), 2, 'omitnan');
+                    traces = traces - b;
+                end        
+            case "dff_first"
+                b = traces(:,1);
+                traces = (traces - b) ./ b;        
+            case "dff_pre_tx"
+                if isempty(txFrame) || ~isfield(p,'tmaxback') || isempty(p.tmaxback)
+                    b = firstNonNan;
+                else
+                    backFrames = max(1, round(p.tmaxback / dt_hr));   % p.tmaxback is in HOURS
+                    i1 = max(1, txFrame - backFrames);
+                    i2 = max(1, txFrame - 1);
+                    b = mean(traces(:, i1:i2), 2, 'omitnan');
+                end
+                traces = (traces - b) ./ b;
+        end
+
+
         mu = mean(traces, 1, 'omitnan');
         
         switch lower(p.errortype)
