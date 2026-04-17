@@ -317,10 +317,25 @@ linetp = cell(size(dataloc.platemapd.pmd.Cell,1),size(dataloc.platemapd.pmd.Cell
 
 for s = 1:numel(catTxnames) % cat each treatment in a loop
     numtreat = size(dataloc.platemapd.pmd.(catTxnames{s}),3)/5;
-    tid = logical(repmat([1,1,1,0,0],1,numtreat));
-    Txcat = cat(3,Txcat, cellfun(@(x)cat(2,x{:}), cat(3,num2cell(dataloc.platemapd.pmd.(catTxnames{s})(:,:,tid),3)),'Un',0));
-    linetp = cat(3,linetp, cellfun(@(x)cat(2,x{:}),...
-    cat(3,num2cell(dataloc.platemapd.pmd.(catTxnames{s})(:,:,4),3)),'Un',0));    
+    % Process each sub-treatment separately and join with '+' so that
+    % multi-treatment slots like "IFNg; LPS" become "IFNg+LPS" rather
+    % than "IFNgLPS" (which was the bug when concatenating all at once).
+    subTxCat = [];
+    for iSub = 1:numtreat
+        sub_tid = false(1, numtreat*5);
+        sub_tid((iSub-1)*5 + (1:3)) = true;   % Name, Conc, Units for this sub-treatment
+        subSlice = cellfun(@(x) local_concat_tx(x), ...
+            cat(3, num2cell(dataloc.platemapd.pmd.(catTxnames{s})(:,:,sub_tid), 3)), 'Un', 0);
+        if isempty(subTxCat)
+            subTxCat = subSlice;
+        else
+            % join consecutive sub-treatments with '+' within same Tx slot
+            subTxCat = cellfun(@(a,b) local_join_tx(a,b), subTxCat, subSlice, 'Un', 0);
+        end
+    end
+    Txcat = cat(3, Txcat, subTxCat);
+    linetp = cat(3, linetp, cellfun(@(x)cat(2,x{:}),...
+        cat(3, num2cell(dataloc.platemapd.pmd.(catTxnames{s})(:,:,4), 3)), 'Un', 0));
 end
 linetp = linetp(:,:,2:end); % remove empty layer from initialization
 linetp = num2cell(linetp,3);
@@ -731,7 +746,8 @@ for iPlot = 1:numel(p.plottype)
                                     cmapcol = PlotRules(iChan).CmapColor;
                                     if NumChans > 1; PlotQs = false; else; PlotQs = true; end
                                     if ~isempty(p.ymn) && ~isempty(p.ymx); ymn = p.ymn{iChan}; ymx = p.ymx{iChan}; else; ymx = []; ymn=[]; end
-                                    if iChan == 1 && NumChans > 1; yyaxis left; elseif iChan > 1; yyaxis right; AH=gca; end
+                                    if iChan == 1 && NumChans > 1; yyaxis left; elseif iChan > 1; yyaxis right; end
+                                    AH=gca; 
                                     pDat = dataloc.d{xy(sb)}.data.(channel{iChan})(:,firsttp:tracklength);
                                     if ~isempty(p.smooth); pDat = movmean(pDat,p.smooth,2); end % smooth data if requested
                                     [~,I]=sort(sum(isnan(pDat),2));
@@ -753,7 +769,16 @@ for iPlot = 1:numel(p.plottype)
                                         set(gca,'YColor','k');
                                     ylabel(strrep(channel{iChan},'_',' '),'Color',PlotRules(iChan).CmapColor);
                                     end
-                                    title([legname{sa}, ' Cell ',num2str(iCell)])
+                                    % Recover original XY + cellID for ct_cell_video
+                                    if isfield(dataloc.d{xy(sb)},'source') && ...
+                                            ~isempty(dataloc.d{xy(sb)}.source) && ...
+                                            I(iCell) <= size(dataloc.d{xy(sb)}.source,1)
+                                        orig_xy  = dataloc.d{xy(sb)}.source(I(iCell),1);
+                                        orig_cid = dataloc.d{xy(sb)}.source(I(iCell),2);
+                                        title([legname{sa},' XY',num2str(orig_xy),' Cell ',num2str(orig_cid)])
+                                    else
+                                        title([legname{sa},' XY',num2str(xy(sb)),' Cell ',num2str(I(iCell))])
+                                    end
                                     if ~isempty(txs)
                                         xline(txs,'--','LineWidth', 1)
                                     end
@@ -1013,8 +1038,7 @@ for iPlot = 1:numel(p.plottype)
         sgtitle(strrep(tittxt,'_',' '));
 
         if ~exist('h','var') && contains(p.plottype{iPlot}, "sorted stacks v2")
-            h = get(gcf, 'Children');
-            h = h.Children;
+            h = get(gcf, 'Children');   % graphics array — non-empty if figure has content
         end
         
         if (~contains(p.plottype{iPlot}, "intensity bin")) && exist('h','var') && p.standardizeplots && ~isempty(figgy) %&& ~isempty(legtxt)
@@ -1035,21 +1059,21 @@ for iPlot = 1:numel(p.plottype)
         if ~isempty(get(gcf, 'Children')) %dont save an empty figuer
         switch p.printstyle
             case 'pdf'
-                set(gcf,'visible','off','Resize','off','Renderer', 'painter')
-                set(gcf,'units','inches','PaperSize', [(3*figgy.GridSize(2)), (3*figgy.GridSize(1))],'position', [0.5,0.5,(3*figgy.GridSize(2))+0.5, (3*figgy.GridSize(1))+0.5],'OuterPosition',[0.5,0.5,(3*figgy.GridSize(2))+0.5, (3*figgy.GridSize(1))+0.5]) %[0,0,figgy.GridSize(2)*270,figgy.GridSize(1)*270])
-                fontsize(gcf,p.font_size,"points")
-                fontname(gcf,'Calibri')
-                exportgraphics(gcf, [FullSaveName,'.pdf'],'Resolution', 300 ) % 300 dpi printing
+                set(figgy.Parent,'visible','off','Resize','off','Renderer', 'painter')
+                set(figgy.Parent,'units','inches','PaperSize', [(3*figgy.GridSize(2)), (3*figgy.GridSize(1))],'position', [0.5,0.5,(3*figgy.GridSize(2))+0.5, (3*figgy.GridSize(1))+0.5],'OuterPosition',[0.5,0.5,(3*figgy.GridSize(2))+0.5, (3*figgy.GridSize(1))+0.5])
+                fontsize(figgy.Parent,p.font_size,"points")
+                fontname(figgy.Parent,'Calibri')
+                exportgraphics(figgy.Parent, [FullSaveName,'.pdf'],'Resolution', 300)
             case 'svg'
-                set(gcf,'Renderer', 'painter','units','inches') % ,'normalized','outerposition',[0 0 1 1])
-                set(gcf,'Position',[0.5,0.5,2*figgy.GridSize(2)+0.5, (2*figgy.GridSize(1))+0.5],"Papersize",[2*figgy.GridSize(2)+1, (2*figgy.GridSize(1))+1],'Resize',false) %
-                fontsize(gcf,p.font_size,"points"); fontname(gcf,'Calibri');
-                if ~isempty(findall(gcf,'Type','axes'))
-                    saveas(gcf, FullSaveName, 'svg')
+                set(figgy.Parent,'Renderer', 'painter','units','inches')
+                set(figgy.Parent,'Position',[0.5,0.5,2*figgy.GridSize(2)+0.5, (2*figgy.GridSize(1))+0.5],"Papersize",[2*figgy.GridSize(2)+1, (2*figgy.GridSize(1))+1],'Resize',false)
+                fontsize(figgy.Parent,p.font_size,"points"); fontname(figgy.Parent,'Calibri');
+                if ~isempty(findall(figgy.Parent,'Type','axes'))
+                    saveas(figgy.Parent, FullSaveName, 'svg')
                 end
             case 'test'
-                set(gcf,'Position',[0,50,360*figgy.GridSize(2), (360*figgy.GridSize(1))+50],'Renderer', 'painter') %
-                saveas(gcf, FullSaveName, 'svg')
+                set(figgy.Parent,'Position',[0,50,360*figgy.GridSize(2), (360*figgy.GridSize(1))+50],'Renderer', 'painter')
+                saveas(figgy.Parent, FullSaveName, 'svg')
         end
 
             if exist('printTable','var') %print the table for the data
@@ -1058,7 +1082,7 @@ for iPlot = 1:numel(p.plottype)
             end
         else; warning([dataloc.file.base, ChanSaveName, ' has no data, so no plots will appear.']) %warn people of empty 
         end
-        if p.closefigs; close(gcf); end
+        if p.closefigs; close(figgy.Parent); end
         end %facetby loop
         clear h;
 end %iplot loop
@@ -1793,6 +1817,10 @@ end
 PlotD = struct('d',[],'z',[],'IFd',[],'txx',[]);
 PlotD.d = cell([1,totalXYs]); PlotD.z = cell([1,totalXYs]); PlotD.IFd = cell([1,totalXYs]);
 
+% source{newXYNum} = [original_xy, original_cellID] per combined row
+% Used to recover original XY and cellID from the combined dataloc for ct_cell_video
+source_per_xy = cell(1, totalXYs);
+
 newXYNums = 1:totalXYs;
 xyCounter = 0;
 sizeD = size(dataloc.d,2); % what is the max d number
@@ -1842,6 +1870,12 @@ for iCellline = 1:numel(cellfn) %cell line loop
                         
                     if ~isfield(PlotD.d{newXYNum}.data, ThisChan)
                         PlotD.d{newXYNum}.data.(ThisChan) = dataloc.d{ThisXY}.data.(ThisChan); %hold the data
+                        % track source XY + original cellID for first channel only
+                        if iChan == 1
+                            nRows = size(dataloc.d{ThisXY}.data.(ThisChan), 1);
+                            source_per_xy{newXYNum} = [source_per_xy{newXYNum}; ...
+                                repmat(ThisXY, nRows, 1), (1:nRows)'];
+                        end
                         if firstxy
                             linetp2{newXYNum} = linetp{cell2mat(cellfun(@(x)any(x == ThisXY),xymat,'un',0))}; % get the txx tps for xlines
                             firstxy = false;
@@ -1883,6 +1917,12 @@ end %cell line loop
 % Now replace dataloc and tx with the new stuff
 
 dataloc.d = cell(size(PlotD.d,2)); dataloc.d = PlotD.d;
+% Store source tracking in each combined d element
+for iSrc = 1:numel(source_per_xy)
+    if ~isempty(dataloc.d{iSrc}) && isfield(dataloc.d{iSrc},'data')
+        dataloc.d{iSrc}.source = source_per_xy{iSrc};  % [original_xy, original_cellID]
+    end
+end
 dataloc.IFd = cell(size(PlotD.IFd,2)); dataloc.IFd = PlotD.IFd;
 dataloc.z = cell(size(PlotD.z,2)); dataloc.z = PlotD.z;
 goodxy = ~cellfun(@isempty, dataloc.d)'; 
@@ -2053,4 +2093,21 @@ if p.addif
 end
 clear dHold;
 yticks([])
+end
+
+
+function out = local_concat_tx(x)
+%LOCAL_CONCAT_TX  Safely concatenate char fields of a sub-treatment cell, ignoring NaNs.
+    chars = x(cellfun(@ischar, x));
+    if isempty(chars); out = ''; else; out = strtrim(cat(2, chars{:})); end
+end
+
+function out = local_join_tx(a, b)
+%LOCAL_JOIN_TX  Join two sub-treatment strings with '+', skipping empty ones.
+    a = strtrim(a);  b = strtrim(b);
+    if isempty(a) && isempty(b);  out = '';
+    elseif isempty(a);            out = b;
+    elseif isempty(b);            out = a;
+    else;                         out = [a '+' b];
+    end
 end
