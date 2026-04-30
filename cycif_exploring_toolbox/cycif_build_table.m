@@ -11,9 +11,10 @@ function T = cycif_build_table(dataloc, comp)
 %   T  — table, one row per cell, columns:
 %          xy, cellid, [markers...],
 %          ptx_name, ptx_conc, ptx_units, ptx_time, ptx_timeunit, ptx_label,
-%          tx1_name, tx1_conc, tx1_units, tx1_time, tx1_timeunit,
-%          tx2_name, tx2_conc, tx2_units, tx2_time, tx2_timeunit,
-%          tx1_label  (tx1_name + tx2_name combined, e.g. 'IFNg+LPS')
+%          ptx_pool_label, ptx_is_spike,
+%          tx1_name ... txN_name (dynamic, one set per treatment slot),
+%          tx1_label  (all treatment names combined, e.g. 'IFNg+LPS+HC')
+%          condition  (ptx_pool_label + ' | ' + tx1_label, for cellxgene color-by)
 %
 % IDENTITY
 %   Cells are uniquely identified by the (xy, cellid) pair, where cellid
@@ -120,8 +121,12 @@ T = [table(Tmeta.xy, cellid, 'VariableNames', {'xy','cellid'}), ...
      Tmarkers, ...
      Tmeta(:, setdiff(Tmeta.Properties.VariableNames, {'xy'}, 'stable'))];
 
-fprintf('[cycif_build_table] %d cells | %d unique tx1_labels\n', ...
-        height(T), numel(unique(T.tx1_label)));
+% Add combined condition label for cellxgene color-by.
+% e.g. 'Glucose 17mM | IFNg+LPS+HC'
+T.condition = T.ptx_pool_label + ' | ' + T.tx1_label;
+
+fprintf('[cycif_build_table] %d cells | %d unique tx1_labels | %d unique conditions\n', ...
+        height(T), numel(unique(T.tx1_label)), numel(unique(T.condition)));
 end
 
 
@@ -167,42 +172,46 @@ end
 % but are worth excluding or examining separately.
 ptx_is_spike = strcmp(strtrim(ptx_tunit), 'tp');
 
-% Tx1 (treatment 1, slots 1-5)
-tx1_name  = safe(pmd.Tx1, r,c,1);
-tx1_conc  = safe(pmd.Tx1, r,c,2);
-tx1_units = safe(pmd.Tx1, r,c,3);
-tx1_time  = safe(pmd.Tx1, r,c,4);
-tx1_tunit = safe(pmd.Tx1, r,c,5);
+% Dynamic Tx slots — reads all co-treatment blocks from pmd.Tx1
+nTx1_slots = floor(size(pmd.Tx1, 3) / 5);
+tx_names  = cell(1, nTx1_slots);
+tx_concs  = cell(1, nTx1_slots);
+tx_units  = cell(1, nTx1_slots);
+tx_times  = cell(1, nTx1_slots);
+tx_tunits = cell(1, nTx1_slots);
+for k = 1:nTx1_slots
+    base = (k-1)*5;
+    tx_names{k}  = strtrim(safe(pmd.Tx1, r,c, base+1));
+    tx_concs{k}  = strtrim(safe(pmd.Tx1, r,c, base+2));
+    tx_units{k}  = strtrim(safe(pmd.Tx1, r,c, base+3));
+    tx_times{k}  = strtrim(safe(pmd.Tx1, r,c, base+4));
+    tx_tunits{k} = strtrim(safe(pmd.Tx1, r,c, base+5));
+end
 
-% Tx2 (treatment 2, slots 6-10)
-tx2_name  = safe(pmd.Tx1, r,c,6);
-tx2_conc  = safe(pmd.Tx1, r,c,7);
-tx2_units = safe(pmd.Tx1, r,c,8);
-tx2_time  = safe(pmd.Tx1, r,c,9);
-tx2_tunit = safe(pmd.Tx1, r,c,10);
-
-% Combined Tx label e.g. 'IFNg+LPS' | 'IL-4' | 'none'
-parts = {};
-if ~isempty(tx1_name), parts{end+1} = tx1_name; end
-if ~isempty(tx2_name), parts{end+1} = tx2_name; end
-tx1_label = strjoin(parts, '+');
+% Combined label: all non-empty treatment names joined with '+'
+non_empty = tx_names(~cellfun(@isempty, tx_names));
+non_empty = cellfun(@strtrim, non_empty, 'UniformOutput', false);
+tx1_label = strjoin(non_empty, '+');
 if isempty(tx1_label), tx1_label = 'none'; end
 
-cond = table( ...
-    string(ptx_name),       string(ptx_conc),  string(ptx_units), ...
-    string(ptx_time),       string(ptx_tunit), string(ptx_label), ...
-    string(ptx_pool_label), ptx_is_spike, ...
-    string(tx1_name),  string(tx1_conc),  string(tx1_units), ...
-    string(tx1_time),  string(tx1_tunit), ...
-    string(tx2_name),  string(tx2_conc),  string(tx2_units), ...
-    string(tx2_time),  string(tx2_tunit), ...
-    string(tx1_label), ...
-    'VariableNames', { ...
-        'ptx_name','ptx_conc','ptx_units','ptx_time','ptx_timeunit','ptx_label', ...
-        'ptx_pool_label','ptx_is_spike', ...
-        'tx1_name','tx1_conc','tx1_units','tx1_time','tx1_timeunit', ...
-        'tx2_name','tx2_conc','tx2_units','tx2_time','tx2_timeunit', ...
-        'tx1_label'});
+% Build output table: fixed columns + dynamic tx slot columns
+var_names = {'ptx_name','ptx_conc','ptx_units','ptx_time','ptx_timeunit', ...
+             'ptx_label','ptx_pool_label','ptx_is_spike'};
+var_vals  = {string(ptx_name), string(ptx_conc), string(ptx_units), ...
+             string(ptx_time), string(ptx_tunit), ...
+             string(ptx_label), string(ptx_pool_label), ptx_is_spike};
+
+for k = 1:nTx1_slots
+    prefix = sprintf('tx%d', k);
+    var_names = [var_names, {[prefix '_name'],[prefix '_conc'], ...
+                              [prefix '_units'],[prefix '_time'],[prefix '_timeunit']}]; %#ok<AGROW>
+    var_vals  = [var_vals,  {string(tx_names{k}), string(tx_concs{k}), ...
+                              string(tx_units{k}), string(tx_times{k}), string(tx_tunits{k})}]; %#ok<AGROW>
+end
+var_names{end+1} = 'tx1_label';
+var_vals{end+1}  = string(tx1_label);
+
+cond = table(var_vals{:}, 'VariableNames', var_names);
 end
 
 function assigned = i_assigned_markers(staininfo, plate_row, plate_col)

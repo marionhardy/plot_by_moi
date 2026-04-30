@@ -12,7 +12,7 @@ function fig = cycif_plot_distributions(T, varargin)
 %   'n_bins'     scalar      histogram bins                (default 40)
 %   'norm'       string      'probability'|'pdf'|'count'   (default 'probability')
 %   'show_hist'  logical     bar histogram under KDE       (default false)
-%   'alpha'      scalar      KDE fill alpha                (default 0.25)
+%   'alpha'      scalar      KDE fill alpha                (default 0.05)
 %   'lw'         scalar      KDE line width                (default 1.5)
 %   'colormap'   string      'bright'|'parula'|any MATLAB map (default 'bright')
 %   'use_log2'   logical     log2(max(x,1)) before plot    (default true)
@@ -81,6 +81,22 @@ nFacet = numel(facet_levels);
 nCols  = nMk;
 nRows  = nFacet;
 
+% --- Pre-compute shared x-range per marker column across all facets -------
+% Each column (marker) gets the same x-axis limits regardless of facet row,
+% so distributions are directly comparable across glucose conditions.
+col_xlim = zeros(nMk, 2);
+for mi = 1:nMk
+    all_vals = T.(markers{mi});
+    all_vals = all_vals(~isnan(all_vals));
+    if use_log2, all_vals(~isnan(all_vals)) = log2(max(all_vals(~isnan(all_vals)), 1)); end
+    if isempty(all_vals)
+        col_xlim(mi,:) = [0 1];
+    else
+        pad = 0.05 * range(all_vals);
+        col_xlim(mi,:) = [min(all_vals)-pad, max(all_vals)+pad];
+    end
+end
+
 if isempty(fig_pos)
     fig_pos = [40 40 min(300*nCols, 2400) 220*nRows + 60];
 end
@@ -103,17 +119,20 @@ for fi = 1:nFacet
 
         all_vals = Tf.(markers{mi});
         all_vals = all_vals(~isnan(all_vals));
-        if use_log2, all_vals = log2(max(all_vals, 1)); end
+        if use_log2, all_vals(~isnan(all_vals)) = log2(max(all_vals(~isnan(all_vals)), 1)); end
         if isempty(all_vals)
             title(ax, markers{mi}, 'Interpreter','none', 'FontSize', 8);
+            xlim(ax, col_xlim(mi,:));
             hold(ax,'off'); continue;
         end
-        edges = linspace(min(all_vals), max(all_vals), n_bins + 1);
+
+        % Use shared x-range for bin edges so all facets bin identically
+        edges = linspace(col_xlim(mi,1), col_xlim(mi,2), n_bins + 1);
 
         for gi = 1:nGrp
             v = Tf.(markers{mi})(Tf.(group_by) == grp_levels(gi));
             v = v(~isnan(v));
-            if use_log2, v = log2(max(v, 1)); end
+            if use_log2, v(~isnan(v)) = log2(max(v(~isnan(v)), 1)); end
             if numel(v) < 3, continue; end
 
             if show_hist
@@ -139,6 +158,9 @@ for fi = 1:nFacet
             plot(ax, xi, f, 'Color', cmap(gi,:), 'LineWidth', lw);
         end
 
+        % Apply shared x-limits for this marker column
+        xlim(ax, col_xlim(mi,:));
+
         title(ax, markers{mi}, 'Interpreter','none', 'FontSize', 9);
         if mi == 1
             if use_facet
@@ -156,15 +178,13 @@ for fi = 1:nFacet
     end
 end
 
+% --- Shared legend on dedicated invisible axes ----------------------------
 lh = gobjects(nGrp, 1);
 for gi = 1:nGrp
-    lh(gi) = patch(NaN, NaN, cmap(gi,:), 'FaceAlpha', alpha, ...
+    lh(gi) = patch(NaN, NaN, cmap(gi,:), 'FaceAlpha', max(alpha, 0.4), ...
                    'EdgeColor', cmap(gi,:), 'LineWidth', lw, ...
                    'DisplayName', char(grp_levels(gi)));
 end
-% Create an invisible axes spanning the full figure height on the right.
-% Attaching the legend here places it relative to the whole figure,
-% not just the last subplot tile.
 ax_leg = axes(fig, 'Position',[0.92 0 0.08 1], 'Visible','off');
 leg = legend(ax_leg, lh, 'Interpreter','none', 'FontSize', 8);
 leg.Box      = 'off';
@@ -174,12 +194,19 @@ leg.Position = [0.92, 0.5 - leg.Position(4)/2, leg.Position(3), leg.Position(4)]
 sgtitle(fig, sprintf('CyCIF distributions  |  group: %s  |  facet: %s', ...
         group_by, facet_by), 'FontWeight','bold', 'FontSize', 11, 'Interpreter','none');
 
-% --- Save as SVG ---------------------------------------------------------
+% --- Save as SVG ----------------------------------------------------------
 if ~isempty(p.Results.save_path)
     fpath = p.Results.save_path;
-    % Ensure .svg extension
     if ~strcmpi(fpath(end-3:end), '.svg'), fpath = [fpath '.svg']; end
-    % Renderer must be painters for vector SVG output
+
+    % Fix paper size to match the screen figure exactly — prevents SVG crop
+    fig.Units            = 'inches';
+    fig_sz               = fig.Position(3:4);   % [width, height] in inches
+    fig.PaperUnits       = 'inches';
+    fig.PaperSize        = fig_sz;
+    fig.PaperPosition    = [0, 0, fig_sz];
+    fig.PaperPositionMode = 'manual';
+
     print(fig, fpath, '-dsvg', '-painters');
     fprintf('Saved SVG: %s\n', fpath);
 end
@@ -189,7 +216,7 @@ end
 % =========================================================================
 function markers = i_auto_markers(T)
     cols   = T.Properties.VariableNames;
-    is_num = cellfun(@(c) isnumeric(T.(c)) || islogical(T.(c)), cols);
+    is_num = cellfun(@(c) isnumeric(T.(c)) && ~islogical(T.(c)), cols);
     is_id  = ismember(cols, {'xy','cellid','ptx_is_spike'});
     markers = cols(is_num & ~is_id);
 end
@@ -202,16 +229,47 @@ if nargin < 2 || isempty(palette), palette = 'bright'; end
 switch lower(palette)
     case 'bright'
         base = [ ...
+            0.259, 0.263, 0.282;  % 1  charcoal
+            1.000, 0.435, 0.761;  % 2  hot pink
+            0.647, 0.000, 0.380;  % 3  deep magenta
+            0.463, 0.337, 0.875;  % 4  medium purple
+            0.059, 0.420, 0.996;  % 5  vivid blue
+            0.776, 0.855, 0.992;  % 6  soft lavender-blue
+            0.898, 0.702, 0.847;  % 7  soft pink
+            0.875, 0.918, 0.996;  % 8  soft periwinkle
+            0.647, 0.647, 0.647;  % 9  mid grey
+            0.106, 0.106, 0.106]; % 10 near-black
+        if n <= size(base,1)
+            cmap = base(1:n,:);
+        else
+            cmap = lines(n);
+            warning('i_colormap: n=%d exceeds palette size, using lines().', n);
+        end
+
+    case 'pal1'
+        base = [ ...
             0.259, 0.263, 0.282;  % 1 charcoal
             1.000, 0.435, 0.761;  % 2 hot pink
             0.647, 0.000, 0.380;  % 3 deep magenta
             0.463, 0.337, 0.875;  % 4 medium purple
-            0.059, 0.420, 0.996;  % 5 vivid blue
-            0.776, 0.855, 0.992;  % 6 soft lavender-blue
-            0.898, 0.702, 0.847;  % 7 soft pink
-            0.875, 0.918, 0.996;  % 8 soft periwinkle
-            0.647, 0.647, 0.647; % 9 mid grey
-            0.106, 0.106, 0.106];  % 10 near-black
+            0.106, 0.106, 0.106;  % 5 near-black
+            0.776, 0.855, 0.992]; % 6 soft lavender-blue
+        if n <= size(base,1)
+            cmap = base(1:n,:);
+        else
+            cmap = lines(n);
+            warning('i_colormap: n=%d exceeds palette size, using lines().', n);
+        end
+
+    case 'pal2'
+        base = [ ...
+            0.945, 0.431, 0.745;  % 1 hot pink
+            0.898, 0.702, 0.847;  % 2 soft pink
+            0.059, 0.420, 0.996;  % 3 vivid blue
+            0.875, 0.918, 0.996;  % 4 soft periwinkle
+            0.710, 0.620, 0.800;  % 5 muted lavender
+            0.118, 0.122, 0.098;  % 6 near-black
+            0.647, 0.647, 0.647]; % 7 mid grey
         if n <= size(base,1)
             cmap = base(1:n,:);
         else
