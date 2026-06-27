@@ -560,6 +560,7 @@ for iPlot = 1:numel(p.plottype)
                         treatment4XY = str2double(linetp{cell2mat(cellfun(@(x)any(x == xy(sb)),xymat,'un',0))});
                         anyunique = unique(treatment4XY);
                         txs = anyunique(~isnan(anyunique)); txs = txs(txs>0); %get the treatment times not including pretreatments
+                        thisTX = [];   % <-- NEW: default for XYs with no recorded treatments
                         if ~isempty(txs)
                             if numel(txs) < p.aftertreatment; thisTX=txs(end); else; thisTX=txs(p.aftertreatment); end % get treatment number or last treatment
                         end
