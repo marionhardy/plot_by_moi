@@ -45,6 +45,7 @@ function plot_osc_vs_nonosc_traces(dataloc, chanName, dt, varargin)
     addParameter(ip,'xyInclude',[],@(x)isnumeric(x) || islogical(x));
     addParameter(ip,'useBinaryIfNoClass',true,@(x)islogical(x)&&isscalar(x));
     addParameter(ip,'binaryOscAs',uint8(2),@(x)isnumeric(x)&&isscalar(x)&&any(x==[1 2]));
+    addParameter(ip,'sharedYLim',true,@islogical);
 
     % Tx alignment + cropping
     addParameter(ip,'tPre',4,@(x)isnumeric(x)&&isscalar(x)&&x>=0);     % hours before Tx1
@@ -256,6 +257,27 @@ function plot_osc_vs_nonosc_traces(dataloc, chanName, dt, varargin)
     % ---- time axis: Tx is 0 ----
     th = linspace(-P.tPre, P.tPost, Tmax);
 
+    % ---- shared y-limits across all classes ----
+    allVals = [];
+    
+    if ~isempty(M0), allVals = [allVals; M0(:)]; end
+    if ~isempty(M1), allVals = [allVals; M1(:)]; end
+    if ~isempty(M2), allVals = [allVals; M2(:)]; end
+    
+    allVals = allVals(isfinite(allVals));
+    
+    if isempty(allVals)
+        yL = [0 1];  % fallback
+    else
+        yMin = prctile(allVals, 1);   % robust limits
+        yMax = prctile(allVals, 99);
+        if yMin == yMax
+            yMin = yMin - 1;
+            yMax = yMax + 1;
+        end
+        yL = [yMin yMax];
+    end
+
     % ---- plotting ----
     figure('Name',sprintf('Osc classes: %s (Tx-aligned)', chanName), ...
            'NumberTitle','off','Color','w');
@@ -268,6 +290,7 @@ function plot_osc_vs_nonosc_traces(dataloc, chanName, dt, varargin)
         end
         plot(th, nanmean(M0,1), 'b-', 'LineWidth', 2);
     end
+    ylim(yL);
     xline(0,'k-','LineWidth',1);
     hold off; xlim([th(1) th(end)]);
     ylabel(chanName);
@@ -282,6 +305,7 @@ function plot_osc_vs_nonosc_traces(dataloc, chanName, dt, varargin)
         end
         plot(th, nanmean(M1,1), 'k-', 'LineWidth', 2);
     end
+    ylim(yL);
     xline(0,'k-','LineWidth',1);
     hold off; xlim([th(1) th(end)]);
     ylabel(chanName);
@@ -296,6 +320,7 @@ function plot_osc_vs_nonosc_traces(dataloc, chanName, dt, varargin)
         end
         plot(th, nanmean(M2,1), 'r-', 'LineWidth', 2);
     end
+    ylim(yL);
     xline(0,'k-','LineWidth',1);
     hold off; xlim([th(1) th(end)]);
     xlabel(sprintf('time (h) relative to %s', char(P.txField)));

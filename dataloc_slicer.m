@@ -155,41 +155,54 @@ function dataloc2 = dataloc_slicer(dataloc, varargin)
         if ~isempty(keepCells)
             for xy = 1:nXY
                 S = dataloc2.d{xy};
-                if isempty(S) || ~isstruct(S) || ~isfield(S,'cellindex') || isempty(S.cellindex)
-                    continue;
-                end
+                if isempty(S) || ~isstruct(S), continue; end
 
-                ci = S.cellindex(:);
-                rowMask = ismember(ci, keepCells);
-
-                if ~any(rowMask)
-                    % clear but keep structure consistent
-                    S.cellindex = [];
-                    if isfield(S,'data') && ~isempty(S.data)
-                        fns = fieldnames(S.data);
-                        for f = 1:numel(fns)
-                            M = S.data.(fns{f});
-                            if isnumeric(M) && ~isempty(M) && size(M,1)==numel(ci)
-                                S.data.(fns{f}) = M([],:);  % 0-by-T
-                            end
-                        end
-                    end
-                    dataloc2.d{xy} = S;
-                    continue;
-                end
-
-                % subset channels by kept rows
+                % Determine number of data rows from first numeric channel
+                nRows = 0;
                 if isfield(S,'data') && ~isempty(S.data)
                     fns = fieldnames(S.data);
                     for f = 1:numel(fns)
                         M = S.data.(fns{f});
-                        if isnumeric(M) && ~isempty(M) && size(M,1)==numel(ci)
+                        if isnumeric(M) && ~isempty(M)
+                            nRows = size(M,1); break;
+                        end
+                    end
+                end
+                if nRows == 0, continue; end
+
+                % Build cellindex: use stored one if valid, else fabricate 1:nRows
+                if isfield(S,'cellindex') && numel(S.cellindex) == nRows
+                    ci = S.cellindex(:);   % enforce column
+                elseif isfield(S,'cellindex') && ~isempty(S.cellindex) && numel(S.cellindex) ~= nRows
+                    warning('dataloc_slicer: XY %d cellindex length (%d) != data rows (%d). Skipping cell subset for this XY.', ...
+                        xy, numel(S.cellindex), nRows);
+                    continue;
+                else
+                    % cellindex absent — fall back to row numbers, warn once
+                    warning('dataloc_slicer: XY %d has no cellindex; using row indices 1:%d as fallback.', xy, nRows);
+                    ci = (1:nRows)';
+                    S.cellindex = ci;
+                end
+
+                rowMask = ismember(ci, keepCells);
+
+                % Subset data channels (only touch rows that match ci length)
+                if isfield(S,'data') && ~isempty(S.data)
+                    for f = 1:numel(fns)
+                        M = S.data.(fns{f});
+                        if isnumeric(M) && size(M,1) == nRows
                             S.data.(fns{f}) = M(rowMask, :);
                         end
                     end
                 end
 
-                S.cellindex = ci(rowMask);
+                % Update cellindex — empty column vector if none kept
+                S.cellindex = ci(rowMask);   % always a column vector
+
+                if P.debug && ~any(rowMask)
+                    fprintf('[dataloc_slicer] XY %d: no cells matched keep list — cleared.\n', xy);
+                end
+
                 dataloc2.d{xy} = S;
             end
         end
