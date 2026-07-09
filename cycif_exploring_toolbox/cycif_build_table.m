@@ -1,31 +1,34 @@
-function T = cycif_build_table(dataloc, comp, varargin)
+function T = cycif_build_table(dataloc, comp)
 % cycif_build_table  Flatten dataloc into a per-cell table with markers and
 %                    parsed condition metadata. Raw intensities stored;
 %                    any transformation is applied at plot time.
 %
 % INPUT
 %   dataloc   — standard dataloc struct (post ct_cycif_link)
-%   comp      — compartment string: 'nuc' | 'cyt' | 'cell'  (default 'nuc')
+%   comp      — compartment specification, one of:
+%                 'nuc' | 'cyt' | 'cell'        (single compartment, char)
+%                 {'nuc','cyt'}                  (multiple, cell array)
+%                 {'nuc','cyt','ratio_cn'}       (adds cyt/nuc ratio)
+%                 {'nuc','cyt','ratio_cn','ratio_nc'}  (both directions)
+%                 default: 'nuc'
 %
-% NAME-VALUE PARAMETERS
-%   'strict_platemap' — logical (default true). When true, only markers
-%          explicitly assigned via the platemap staininfo grid (in
-%          'ANTIBODY-CHANNEL' format) are populated for each well;
-%          unassigned markers are NaN even if measured. This enforces
-%          the platemap as design document.
-%          When false, all measured markers in dataloc.d{xy}.data are
-%          populated. Use this for fixed-mode workflows built with
-%          ct_cycif_link_fixed's chan_map fallback, where the platemap
-%          grid may be empty by design.
+%              Ratios require BOTH _nuc and _cyt fields on the marker;
+%              markers with only one compartment measured get NaN in the
+%              ratio column. A small epsilon (1e-9) is added to the
+%              denominator to avoid Inf/NaN from divide-by-zero.
 %
 % OUTPUT
 %   T  — table, one row per cell, columns:
-%          xy, cellid, [markers...],
+%          xy, cellid, [markers, one per compartment...],
 %          ptx_name, ptx_conc, ptx_units, ptx_time, ptx_timeunit, ptx_label,
 %          ptx_pool_label, ptx_is_spike,
 %          tx1_name ... txN_name (dynamic, one set per treatment slot),
 %          tx1_label  (all treatment names combined, e.g. 'IFNg+LPS+HC')
 %          condition  (ptx_pool_label + ' | ' + tx1_label, for cellxgene color-by)
+%
+%   Marker column names: '<marker>_<compartment>' (e.g. 'GFP_nuc', 'GFP_cyt',
+%   'GFP_ratio_cn'). Compartment order in the table follows the order in
+%   comp.
 %
 % IDENTITY
 %   Cells are uniquely identified by the (xy, cellid) pair, where cellid
@@ -33,11 +36,28 @@ function T = cycif_build_table(dataloc, comp, varargin)
 
 if nargin < 2 || isempty(comp), comp = 'nuc'; end
 
-% --- Parse name-value pairs ---
-ip = inputParser; ip.CaseSensitive = false;
-addParameter(ip, 'strict_platemap', true, @islogical);
-parse(ip, varargin{:});
-strict_platemap = ip.Results.strict_platemap;
+% Normalize comp to a cell array of compartment strings
+if ischar(comp) || (isstring(comp) && isscalar(comp))
+    comps = {char(comp)};
+elseif iscell(comp)
+    comps = cellfun(@char, comp, 'UniformOutput', false);
+else
+    error('cycif_build_table:badComp', ...
+        'comp must be a char, string, or cell array of strings.');
+end
+
+% Validate each compartment token
+valid_comps = {'nuc', 'cyt', 'cell', 'ratio_cn', 'ratio_nc'};
+for k = 1:numel(comps)
+    if ~any(strcmp(comps{k}, valid_comps))
+        error('cycif_build_table:badComp', ...
+            'Unknown compartment "%s". Valid: %s.', comps{k}, strjoin(valid_comps, ', '));
+    end
+end
+n_comps = numel(comps);
+
+% Ratios (if any) need eps to avoid divide-by-zero
+RATIO_EPS = 1e-9;
 
 pmd = dataloc.platemapd.pmd;
 
@@ -50,27 +70,47 @@ for r = 1:8
     end
 end
 
-% --- Discover markers: union across ALL valid XYs -------------------------
-% Required because different wells receive different antibody subsets.
-% Wells missing a given marker will get NaN (handled in intensity loop).
-suffix  = ['_' comp];
-sfx_len = numel(suffix);
+% --- Discover markers: union across ALL valid XYs and ALL compartments ---
+% Required because different wells receive different antibody subsets and
+% we may need multiple compartments per marker.
+%
+% Strip _nuc/_cyt/_cell suffix from every field to get bare marker names.
+% Ratios don't have their own storage -- they're derived from _nuc and _cyt.
 
 assert(any(cellfun(@(d) ~isempty(d) && isfield(d,'data'), dataloc.d)), ...
        'No valid dataloc.d entries found.');
 
-mk_fields = {};
+storage_suffixes = {'_nuc', '_cyt', '_cell'};
+markers = {};
 for xy_s = 1:numel(dataloc.d)
     d_s = dataloc.d{xy_s};
     if isempty(d_s) || ~isfield(d_s,'data'), continue; end
-    fns     = fieldnames(d_s.data);
-    new_fns = fns(cellfun(@(f) numel(f) > sfx_len && ...
-                           strcmp(f(end-sfx_len+1:end), suffix), fns));
-    mk_fields = union(mk_fields, new_fns, 'stable');
+    fns = fieldnames(d_s.data);
+    for kk = 1:numel(fns)
+        f = fns{kk};
+        for ss = 1:numel(storage_suffixes)
+            sfx = storage_suffixes{ss};
+            if numel(f) > numel(sfx) && strcmp(f(end-numel(sfx)+1:end), sfx)
+                markers = union(markers, {f(1:end-numel(sfx))}, 'stable');
+                break;
+            end
+        end
+    end
 end
-markers = cellfun(@(f) f(1:end-sfx_len), mk_fields, 'UniformOutput', false);
-nMk     = numel(markers);
-fprintf('[cycif_build_table] %d markers (%s): %s\n', nMk, comp, strjoin(markers,', '));
+nMk = numel(markers);
+
+% Build the ordered list of output columns: for each marker, one column per
+% requested compartment. Column names are '<marker>_<compartment>'.
+n_cols_markers = nMk * n_comps;
+col_names = cell(1, n_cols_markers);
+for m = 1:nMk
+    for cc = 1:n_comps
+        col_names{(m-1)*n_comps + cc} = [markers{m} '_' comps{cc}];
+    end
+end
+
+fprintf('[cycif_build_table] %d markers (%s): %s\n', ...
+        nMk, strjoin(comps, ','), strjoin(markers, ', '));
 
 % --- Accumulate rows ------------------------------------------------------
 nXY       = numel(dataloc.d);
@@ -90,30 +130,56 @@ for xy = 1:nXY
         warning('XY %d not found in pmd.xy — skipping.', xy); continue;
     end
 
-    % Determine nCells from the first marker present in this XY
-    present = mk_fields(cellfun(@(f) isfield(d.data,f), mk_fields));
-    if isempty(present), continue; end   % no cycIF data at all for this XY
-    nCells = numel(d.data.(present{1}));
-    if nCells < 1, continue; end
-
-    % Intensity matrix [nCells x nMk]
-    % strict_platemap=true : only populate markers explicitly assigned via
-    %                        platemap staininfo (design-document mode).
-    %                        Markers measured in other rounds/wells but not
-    %                        assigned here get NaN.
-    % strict_platemap=false: populate any measured marker present in
-    %                        d.data. Used for fixed-mode workflows where
-    %                        chan_map (not the platemap grid) drives
-    %                        marker assignment.
-    if strict_platemap
-        assigned = i_assigned_markers(dataloc.platemapd.staininfo, gr, gc);
-    end
-
-    mat = NaN(nCells, nMk);
+    % Determine nCells from the first storage field present in this XY.
+    % Any '<marker>_<nuc|cyt|cell>' field can serve as the size probe.
+    nCells = 0;
     for m = 1:nMk
-        if ~isfield(d.data, mk_fields{m}); continue; end
-        if strict_platemap && ~ismember(markers{m}, assigned); continue; end
-        mat(:,m) = d.data.(mk_fields{m});
+        for ss = 1:numel(storage_suffixes)
+            fld = [markers{m} storage_suffixes{ss}];
+            if isfield(d.data, fld)
+                nCells = numel(d.data.(fld));
+                break;
+            end
+        end
+        if nCells > 0; break; end
+    end
+    if nCells < 1, continue; end   % no cycIF data at all for this XY
+
+    % Intensity matrix [nCells x (nMk * n_comps)]
+    % Only populate markers that staininfo explicitly assigns to this well.
+    % Markers measured in the same stain round but assigned to other wells
+    % (e.g. VEGF in iNOS rows) reflect channel background, not protein
+    % expression — they are set to NaN here to encode experimental design.
+    assigned = i_assigned_markers(dataloc.platemapd.staininfo, gr, gc);
+
+    mat = NaN(nCells, nMk * n_comps);
+    for m = 1:nMk
+        if ~ismember(markers{m}, assigned); continue; end
+        % Pull nuc and cyt once each if either is needed (for ratios or direct)
+        nuc_field = [markers{m} '_nuc'];
+        cyt_field = [markers{m} '_cyt'];
+        has_nuc = isfield(d.data, nuc_field);
+        has_cyt = isfield(d.data, cyt_field);
+        for cc = 1:n_comps
+            col_idx = (m-1)*n_comps + cc;
+            switch comps{cc}
+                case {'nuc', 'cyt', 'cell'}
+                    fld = [markers{m} '_' comps{cc}];
+                    if isfield(d.data, fld)
+                        mat(:, col_idx) = d.data.(fld);
+                    end
+                case 'ratio_cn'
+                    if has_nuc && has_cyt
+                        mat(:, col_idx) = d.data.(cyt_field) ./ ...
+                                          (d.data.(nuc_field) + RATIO_EPS);
+                    end
+                case 'ratio_nc'
+                    if has_nuc && has_cyt
+                        mat(:, col_idx) = d.data.(nuc_field) ./ ...
+                                          (d.data.(cyt_field) + RATIO_EPS);
+                    end
+            end
+        end
     end
 
     % Cell identity — use cellindex if present and conformant, else 1:N
@@ -135,7 +201,7 @@ end
 assert(~isempty(row_data), 'No data collected — check comp/dataloc.');
 
 % --- Assemble final table -------------------------------------------------
-Tmarkers = array2table(vertcat(row_data{:}), 'VariableNames', markers);
+Tmarkers = array2table(vertcat(row_data{:}), 'VariableNames', col_names);
 Tmeta    = vertcat(row_meta{:});
 cellid   = vertcat(row_cids{:});
 
@@ -195,21 +261,37 @@ end
 % but are worth excluding or examining separately.
 ptx_is_spike = strcmp(strtrim(ptx_tunit), 'tp');
 
-% Dynamic Tx slots — reads all co-treatment blocks from pmd.Tx1
-nTx1_slots = floor(size(pmd.Tx1, 3) / 5);
-tx_names  = cell(1, nTx1_slots);
-tx_concs  = cell(1, nTx1_slots);
-tx_units  = cell(1, nTx1_slots);
-tx_times  = cell(1, nTx1_slots);
-tx_tunits = cell(1, nTx1_slots);
-for k = 1:nTx1_slots
-    base = (k-1)*5;
-    tx_names{k}  = strtrim(safe(pmd.Tx1, r,c, base+1));
-    tx_concs{k}  = strtrim(safe(pmd.Tx1, r,c, base+2));
-    tx_units{k}  = strtrim(safe(pmd.Tx1, r,c, base+3));
-    tx_times{k}  = strtrim(safe(pmd.Tx1, r,c, base+4));
-    tx_tunits{k} = strtrim(safe(pmd.Tx1, r,c, base+5));
+% --- Dynamic Tx slots -- read every pmd.Tx<N> section ---
+% Historically only pmd.Tx1 was read. But iman_readdatasheet splits multiple
+% "Tx" blocks in the xlsx into pmd.Tx1, pmd.Tx2, ..., pmd.TxN. Iterate over
+% all of them and concatenate their per-well slots. Column names follow a
+% global counter (tx1_*, tx2_*, ...); when each Tx<N> section holds one
+% slot, tx<N>_ maps to Tx<N> naturally.
+tx_field_names = fieldnames(pmd);
+tx_field_names = tx_field_names( ...
+    ~cellfun('isempty', regexp(tx_field_names, '^Tx\d+$', 'once')));
+% Sort by numeric suffix so Tx2 comes after Tx1 (not lexicographic)
+[~, tx_order] = sort(cellfun(@(s) sscanf(s, 'Tx%d'), tx_field_names));
+tx_field_names = tx_field_names(tx_order);
+
+tx_names  = {};
+tx_concs  = {};
+tx_units  = {};
+tx_times  = {};
+tx_tunits = {};
+for it = 1:numel(tx_field_names)
+    Tx = pmd.(tx_field_names{it});
+    n_slots_here = floor(size(Tx, 3) / 5);
+    for k = 1:n_slots_here
+        base = (k-1)*5;
+        tx_names{end+1}  = strtrim(safe(Tx, r,c, base+1)); %#ok<AGROW>
+        tx_concs{end+1}  = strtrim(safe(Tx, r,c, base+2)); %#ok<AGROW>
+        tx_units{end+1}  = strtrim(safe(Tx, r,c, base+3)); %#ok<AGROW>
+        tx_times{end+1}  = strtrim(safe(Tx, r,c, base+4)); %#ok<AGROW>
+        tx_tunits{end+1} = strtrim(safe(Tx, r,c, base+5)); %#ok<AGROW>
+    end
 end
+nTx1_slots = numel(tx_names);   % keep the same name for downstream loop
 
 % Combined label: all non-empty treatment names joined with '+'
 non_empty = tx_names(~cellfun(@isempty, tx_names));
