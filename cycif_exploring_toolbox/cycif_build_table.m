@@ -1,4 +1,4 @@
-function T = cycif_build_table(dataloc, comp)
+function T = cycif_build_table(dataloc, comp, varargin)
 % cycif_build_table  Flatten dataloc into a per-cell table with markers and
 %                    parsed condition metadata. Raw intensities stored;
 %                    any transformation is applied at plot time.
@@ -6,6 +6,17 @@ function T = cycif_build_table(dataloc, comp)
 % INPUT
 %   dataloc   — standard dataloc struct (post ct_cycif_link)
 %   comp      — compartment string: 'nuc' | 'cyt' | 'cell'  (default 'nuc')
+%
+% NAME-VALUE PARAMETERS
+%   'strict_platemap' — logical (default true). When true, only markers
+%          explicitly assigned via the platemap staininfo grid (in
+%          'ANTIBODY-CHANNEL' format) are populated for each well;
+%          unassigned markers are NaN even if measured. This enforces
+%          the platemap as design document.
+%          When false, all measured markers in dataloc.d{xy}.data are
+%          populated. Use this for fixed-mode workflows built with
+%          ct_cycif_link_fixed's chan_map fallback, where the platemap
+%          grid may be empty by design.
 %
 % OUTPUT
 %   T  — table, one row per cell, columns:
@@ -21,6 +32,12 @@ function T = cycif_build_table(dataloc, comp)
 %   matches dataloc.d{xy}.cellindex — enabling join-back to live traces.
 
 if nargin < 2 || isempty(comp), comp = 'nuc'; end
+
+% --- Parse name-value pairs ---
+ip = inputParser; ip.CaseSensitive = false;
+addParameter(ip, 'strict_platemap', true, @islogical);
+parse(ip, varargin{:});
+strict_platemap = ip.Results.strict_platemap;
 
 pmd = dataloc.platemapd.pmd;
 
@@ -80,17 +97,23 @@ for xy = 1:nXY
     if nCells < 1, continue; end
 
     % Intensity matrix [nCells x nMk]
-    % Only populate markers that staininfo explicitly assigns to this well.
-    % Markers measured in the same stain round but assigned to other wells
-    % (e.g. VEGF in iNOS rows) reflect channel background, not protein
-    % expression — they are set to NaN here to encode experimental design.
-    assigned = i_assigned_markers(dataloc.platemapd.staininfo, gr, gc);
+    % strict_platemap=true : only populate markers explicitly assigned via
+    %                        platemap staininfo (design-document mode).
+    %                        Markers measured in other rounds/wells but not
+    %                        assigned here get NaN.
+    % strict_platemap=false: populate any measured marker present in
+    %                        d.data. Used for fixed-mode workflows where
+    %                        chan_map (not the platemap grid) drives
+    %                        marker assignment.
+    if strict_platemap
+        assigned = i_assigned_markers(dataloc.platemapd.staininfo, gr, gc);
+    end
 
     mat = NaN(nCells, nMk);
     for m = 1:nMk
-        if isfield(d.data, mk_fields{m}) && ismember(markers{m}, assigned)
-            mat(:,m) = d.data.(mk_fields{m});
-        end
+        if ~isfield(d.data, mk_fields{m}); continue; end
+        if strict_platemap && ~ismember(markers{m}, assigned); continue; end
+        mat(:,m) = d.data.(mk_fields{m});
     end
 
     % Cell identity — use cellindex if present and conformant, else 1:N
