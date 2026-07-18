@@ -46,7 +46,7 @@ addParameter(ip, 'ifchan', 'CY5_Nuc', @ischar);
 addParameter(ip, 'ncells', [], @(x) isempty(x)||isscalar(x));
 addParameter(ip, 'nogene', false, @(x) islogical(x)||isnumeric(x));
 addParameter(ip, 'plotfromzero', false, @islogical);
-addParameter(ip, 'save', false, @islogical);
+addParameter(ip, 'save', true, @islogical);   % V5: default true (save on by default)
 addParameter(ip, 'smooth', [], @(x) isempty(x)||isvector(x));
 addParameter(ip, 'specsubset', false, @islogical);
 addParameter(ip, 'standardizeplots', true, @islogical);   % V5: gates dl_plotstandardize

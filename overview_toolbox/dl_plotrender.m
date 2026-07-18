@@ -32,9 +32,44 @@ R.timeWindow  = @timeWindow;
 R.timeAxis    = @timeAxis;
 R.txLines     = @txLines;
 R.exportSVG   = @exportSVG;
-R.exportTileSVG = @exportTileSVG;
 R.safeTitle   = @safeTitle;
 R.styleAxis   = @styleAxis;
+R.styleTile   = @styleTile;
+end
+
+
+function styleTile(AH, nCh)
+% Decluttered styling for dense tile grids (sorted stacks). Keeps per-tile
+% axes (light structural change) but removes the visual noise that made the
+% 50-tile figure unreadable: repeated channel y-labels dropped, ticks thin
+% and outward, tick LABELS thinned so numbers don't collide at small size.
+% Traces keep the full pixel budget. nCh = 1 or 2 (yyaxis).
+box(AH, 'on');
+set(AH, 'Layer','top', 'TickDir','out', 'LineWidth',0.4, ...
+        'XMinorTick','off', 'YMinorTick','off', 'TickLength',[0.03 0.03]);
+
+if nCh > 1
+    for side = {'left','right'}
+        yyaxis(AH, side{1});
+        ylabel(AH, '');
+        thinYTicks(AH);
+    end
+    yyaxis(AH, 'left');           % leave active side deterministic
+else
+    ylabel(AH, '');
+    thinYTicks(AH);
+end
+end
+
+
+function thinYTicks(AH)
+% Keep only min / 0 / max y-ticks so the axis reads without a dense stack.
+yl = ylim(AH);
+if yl(1) < 0 && yl(2) > 0
+    yticks(AH, unique([yl(1) 0 yl(2)]));
+else
+    yticks(AH, unique([yl(1) yl(2)]));
+end
 end
 
 
@@ -55,9 +90,16 @@ end
 function tw = timeWindow(dataloc, xy, chan1, linetp_xy, p)
 % Resolve the plotted time window for one xy: treatment tp, first/last tp.
 % Mirrors v4's firsttp/tracklength/thisTX logic exactly.
-treat = str2double(linetp_xy);
-u = unique(treat); u = u(~isnan(u)); u = u(u>0);
-txs = u(:)';
+% linetp_xy may be a numeric vector (v5 prep: ALL sub-treatment times) or a
+% legacy char/cell string; coerce to a numeric row of positive timepoints.
+if iscell(linetp_xy); linetp_xy = [linetp_xy{:}]; end
+if ischar(linetp_xy) || isstring(linetp_xy)
+    treat = str2double(linetp_xy);
+else
+    treat = double(linetp_xy);
+end
+u = unique(treat(:)'); u = u(~isnan(u)); u = u(u>0);
+txs = u;
 
 thisTX = [];
 if ~isempty(txs)
@@ -87,8 +129,10 @@ end
 
 
 function txLines(AH, tw)
-% Dashed vertical lines at treatment timepoints.
-if ~isempty(tw.txs); xline(AH, tw.txs, '--', 'LineWidth', 1); end
+% Fine dotted vertical lines at every treatment timepoint.
+if ~isempty(tw.txs)
+    xline(AH, tw.txs, ':', 'LineWidth', 0.5, 'Color', [0.35 0.35 0.35], 'Alpha', 0.9);
+end
 end
 
 
@@ -179,48 +223,13 @@ end
 end
 
 
-function fname = exportTileSVG(AH, dataloc, parts, p)
-% Save ONE tile (its axes) as a standalone SVG -> one file per condition.
-% parts: struct with .plottype .channel .facet .group (all char) -> filename
-%        base_plottype_channel_facet_group.svg (no timestamp; re-runs
-%        overwrite intentionally, per convention).
-% Returns the filename (without extension) for logging.
-fname = '';
-if ~p.save; return; end
-if isfield(dataloc,'fold') && isfield(dataloc.fold,'fig') && ~isempty(dataloc.fold.fig)
-    figdir = dataloc.fold.fig;
-else
-    figdir = pwd;
-    warning('dl_plotrender:NoFigDir','No dataloc.fold.fig; saving SVG to pwd.');
-end
-if ~exist(figdir,'dir'); mkdir(figdir); end
-
-raw = sprintf('%s_%s_%s_%s_%s', dataloc.file.base, parts.plottype, ...
-    parts.channel, parts.facet, parts.group);
-fname = matlab.lang.makeValidName(raw);
-
-% Copy just this tile into a fresh, correctly-sized figure so tiledlayout
-% siblings aren't dragged along. copyobj on a yyaxis axes can return >1
-% handle; position all of them identically.
-tmp = figure('Visible','off','Color','w','Units','inches','Position',[1 1 3.2 2.4]);
-try
-    newAx = copyobj(AH, tmp);
-    set(newAx, 'Units','normalized');
-    for a = 1:numel(newAx); set(newAx(a), 'Position',[0.16 0.16 0.78 0.72]); end
-    set(tmp, 'Renderer','painters'); fontname(tmp,'Calibri');
-    saveas(tmp, fullfile(figdir, fname), 'svg');
-catch ME
-    warning('dl_plotrender:TileExportFailed', ...
-        'Per-tile SVG export failed for %s (%s); skipping.', fname, ME.message);
-end
-close(tmp);
-end
-
-
 function exportSVG(figH, dataloc, tag, p)
-% Save the WHOLE figure as one SVG (v4 printstyle='svg'). Retained for
-% callers that want the full tiled figure; the renderers now use
-% exportTileSVG for one-file-per-condition instead.
+% Save the WHOLE figure as one vector SVG per facet.
+% Uses print(...,'-dsvg','-painters') rather than exportgraphics/saveas:
+% print operates on the FIGURE (not a tile axes), so it sidesteps the
+% "multiple coordinate systems" / container errors that exportgraphics
+% raises on a yyaxis tile. '-painters' forces true vector output (not a
+% flattened raster), which is required for Illustrator/Inkscape editing.
 if ~p.save; return; end
 if isfield(dataloc,'fold') && isfield(dataloc.fold,'fig') && ~isempty(dataloc.fold.fig)
     figdir = dataloc.fold.fig;
@@ -229,8 +238,36 @@ else
     warning('dl_plotrender:NoFigDir','No dataloc.fold.fig; saving SVG to pwd.');
 end
 if ~exist(figdir,'dir'); mkdir(figdir); end
-fname = matlab.lang.makeValidName(sprintf('%s_%s', dataloc.file.base, tag));
-set(figH,'Renderer','painters','Units','inches');
-fontname(figH,'Calibri');
-saveas(figH, fullfile(figdir, fname), 'svg');
+
+% V5 NAMING: use the experiment DATE (leading yyyy-mm-dd of the folder/exp
+% name) as the prefix, not the full base string. The date is the stable,
+% human-meaningful identifier; the long base produced unwieldy names, and
+% makeValidName mangled the dashes (2026-06-25 -> x2026_06_25). We keep the
+% dash-form date, sanitize only the tag, and join with '__'.
+dateStr = local_expdate(dataloc);
+tagStr  = matlab.lang.makeValidName(tag);      % tag already carries facet/chan
+fname   = sprintf('%s__%s', dateStr, tagStr);
+
+set(figH, 'Renderer', 'painters');            % force vector, not opengl raster
+fontname(figH, 'Calibri');
+try
+    print(figH, fullfile(figdir, [fname '.svg']), '-dsvg', '-painters');
+catch ME
+    warning('dl_plotrender:SVGExportFailed', ...
+        'SVG export failed for %s (%s); skipping.', fname, ME.message);
+end
+end
+
+
+function d = local_expdate(dataloc)
+% Extract the experiment date (yyyy-mm-dd) from the start of the folder/exp
+% name. Falls back through exp.name -> file.base -> 'nodate'.
+src = '';
+if isfield(dataloc,'exp') && isfield(dataloc.exp,'name') && ~isempty(dataloc.exp.name)
+    src = dataloc.exp.name;
+elseif isfield(dataloc,'file') && isfield(dataloc.file,'base') && ~isempty(dataloc.file.base)
+    src = dataloc.file.base;
+end
+tok = regexp(char(src), '^(\d{4}-\d{2}-\d{2})', 'tokens', 'once');
+if ~isempty(tok); d = tok{1}; else; d = 'nodate'; end
 end

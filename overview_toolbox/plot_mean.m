@@ -58,7 +58,6 @@ for iSpec = 1:numel(p.channel)
         figH = R.newFigure(sprintf('plot_mean | %s | %s', strjoin(chans,'+'), char(prep.facetby{s})));
         figs(end+1) = figH; %#ok<AGROW>
         T = tiledlayout(figH,'flow','TileSpacing','compact','Padding','compact');
-        tileAx = gobjects(0); tileGrp = {};   % collect tiles for per-condition SVG
 
         for g = 1:numel(prep.groupby)
             xys = intersect(prep.idx.(prep.facetby{s}), prep.idx.(prep.groupby{g}));
@@ -101,8 +100,6 @@ for iSpec = 1:numel(p.channel)
                     xlim(AH, [tw.firsttp-1, tw.tracklength]);
                     title(AH, R.safeTitle(prep.legname{g}), 'Interpreter','none');
                     R.styleAxis(AH);
-                    tileAx(end+1)  = AH;                 %#ok<AGROW> collect for export
-                    tileGrp{end+1} = prep.groupby{g};    %#ok<AGROW>
                 end
             end
         end
@@ -112,12 +109,13 @@ for iSpec = 1:numel(p.channel)
         fontsize(figH, p.font_size, 'points'); fontname(figH,'Calibri');
         % V5: harmonize y-limits across tiles (per-channel if yyaxis overlay)
         dl_plotstandardize(figH, 'mean', chans, p);
-        % V5: one SVG per condition (tile), named base_plottype_channel_facet_group
-        for it = 1:numel(tileAx)
-            R.exportTileSVG(tileAx(it), dl, struct('plottype','mean', ...
-                'channel',strjoin(chans,'-'), 'facet',char(prep.facetby{s}), ...
-                'group',tileGrp{it}), p);
-        end
+        % V5: one vector SVG per facet figure (tiles = treatments inside it).
+        % Guard the facet name so an empty facetby entry can't collapse every
+        % facet onto one filename (the "single file overwritten" bug).
+        facetName = char(prep.facetby{s});
+        if isempty(strtrim(facetName)); facetName = sprintf('facet%d', s); end
+        R.exportSVG(figH, dl, sprintf('mean_%s_%s', ...
+            strjoin(chans,'-'), facetName), p);
         if p.closefigs && p.save; close(figH); end   % V5: guard on save (v4 closed unconditionally but assumed saving)
     end
 end
