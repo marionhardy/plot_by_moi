@@ -108,6 +108,28 @@ if ~isempty(txs)
 end
 
 tMax = size(dataloc.d{xy}.data.(chan1), 2);
+
+% V5 FIX: absolute manual window (tstart/tend, in FRAMES already -- converted
+% from minutes in dl_plotparse) was parsed but never consumed here, so cropping
+% silently no-op'd. Absolute window overrides the tx-relative logic below.
+if ~isempty(p.tstart) || ~isempty(p.tend)
+    relSet = p.plotfromzero || ~isempty(p.tbeforetx) || ~isempty(p.tmaxaftertx);
+    if relSet
+        warning('dl_plotrender:WindowConflict', ...
+            ['tstart/tend (absolute) given alongside tx-relative window params ', ...
+             '(plotfromzero/tbeforetx/tmaxaftertx); absolute window wins.']);
+    end
+    firsttp     = 1;    if ~isempty(p.tstart); firsttp     = max(1,    p.tstart); end
+    tracklength = tMax; if ~isempty(p.tend);   tracklength = min(tMax, p.tend);   end
+    if firsttp >= tracklength
+        error('dl_plotrender:BadWindow', ...
+            'tstart (%d) must be < tend (%d) in frames.', firsttp, tracklength);
+    end
+    if ~isempty(txs); txs = txs(txs >= firsttp & txs < tracklength); end
+    tw = struct('firsttp',firsttp, 'tracklength',tracklength, 'thisTX',thisTX, 'txs',txs);
+    return
+end
+
 if isempty(p.tmaxaftertx); tracklength = tMax; else; tracklength = p.tmaxaftertx + thisTX; end
 if tracklength > tMax; tracklength = tMax; end
 

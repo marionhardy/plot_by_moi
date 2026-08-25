@@ -52,9 +52,41 @@ for iSpec = 1:numel(p.channel)
     end
 
     for s = 1:numel(prep.facetby)
+        fprintf('plot_sorted_stacks: facet %d/%d (%s)...\n', ...
+            s, numel(prep.facetby), char(prep.facetby{s}));
+
+        % --- Pre-count the tiles this facet will draw, so the FIGURE can be
+        % sized to a fixed per-tile dimension (tiles stay the same size
+        % whether you ask for 10, 50, or 100 cells; the figure grows). ---
+        nTiles = 0;
+        contribXY = [];      % which wells actually contribute tiles
+        contribN  = [];      % how many tiles each contributes
+        for g = 1:numel(prep.groupby)
+            xys = intersect(prep.idx.(prep.facetby{s}), prep.idx.(prep.groupby{g}));
+            for xy = xys(:)'
+                if xy > numel(dl.d) || isempty(dl.d{xy}) || ~isfield(dl.d{xy}.data, chans{1}); continue; end
+                if ~prep.goodxy(xy); continue; end
+                nCells = size(dl.d{xy}.data.(chans{1}),1);
+                if ~isempty(p.ncells) && p.ncells <= nCells; nCells = p.ncells; end
+                nWant = p.ntracks * p.nstacks;
+                if nCells < nWant; nWant = floor(nCells/p.nstacks)*p.nstacks; end
+                nTiles = nTiles + nWant;
+                contribXY(end+1) = xy;    %#ok<AGROW>
+                contribN(end+1)  = nWant; %#ok<AGROW>
+            end
+        end
+        if nTiles == 0; continue; end
+
+        nCols = ceil(sqrt(nTiles));            % near-square grid
+        nRows = ceil(nTiles / nCols);
+        tileW = 2.2;  tileH = 1.6;             % inches per tile (fixed size)
+        figW  = min(nCols*tileW, 60);          % cap so it never exceeds a sane max
+        figH_in = min(nRows*tileH + 0.6, 40);  % +0.6 for the layout title
+
         figH = R.newFigure(sprintf('plot_sorted_stacks | %s | %s', strjoin(chans,'+'), char(prep.facetby{s})));
+        set(figH, 'Units','inches', 'Position',[0.5 0.5 figW figH_in]);
         figs(end+1) = figH; %#ok<AGROW>
-        T = tiledlayout(figH,'flow','TileSpacing','compact','Padding','compact');
+        T = tiledlayout(figH, nRows, nCols, 'TileSpacing','compact','Padding','compact');
 
         for g = 1:numel(prep.groupby)
             xys = intersect(prep.idx.(prep.facetby{s}), prep.idx.(prep.groupby{g}));
@@ -82,33 +114,55 @@ for iSpec = 1:numel(p.channel)
                         rules = R.formatRules(chans{c});
                         plot(AH, D(I(k),:), 'Color', rules.CmapColor, 'LineStyle','-');
                         set(AH,'YColor','k');
-                        ylabel(AH, rules.Ylabel, 'Color', rules.CmapColor);
                         if iscell(p.ymn) && numel(p.ymn)>=c; ylim(AH,[p.ymn{c}, p.ymx{c}]); end
                     end
 
-                    % title = "Cell <origID>" only (recover ID through .source)
+                    % title = "Cell <origID> (XY n)" -- XY makes each tile
+                    % self-identifying, so a condition backed by 3 replicate
+                    % wells is visibly distinguishable from one backed by 1.
                     if isfield(dl.d{xy},'source') && ~isempty(dl.d{xy}.source) && I(k) <= size(dl.d{xy}.source,1)
-                        cid = dl.d{xy}.source(I(k),2);
+                        cid    = dl.d{xy}.source(I(k),2);   % original cell id
+                        origXY = dl.d{xy}.source(I(k),1);   % original well (pre-combine)
                     else
-                        cid = I(k);
+                        cid    = I(k);
+                        origXY = xy;
                     end
-                    title(AH, sprintf('Cell %d', cid), 'FontWeight','normal');
+                    title(AH, sprintf('Cell %d (XY%d)', cid, origXY), 'FontWeight','normal');
 
                     R.txLines(AH, tw);
                     R.timeAxis(AH, tw, p);
                     xlim(AH, [tw.firsttp-1, tw.tracklength]);
-                    R.styleAxis(AH);
+                    R.styleTile(AH, nCh);      % declutter: thin ticks, drop repeated y-labels
                     hold(AH,'off');
                 end
             end
         end
 
-        title(T, sprintf('%s | %s | sorted stacks | %s', strrep(dl.file.base,'_',' '), ...
-            strjoin(strrep(chans,'_',' '),', '), strrep(char(prep.facetby{s}),'_',' ')), ...
-            'Interpreter','none');
+        % figure title carries the constant context (cell type, channels) so
+        % tiles don't have to repeat it; color-codes the channels since the
+        % per-tile y-labels were removed for decluttering.
+        if nCh > 1
+            chanTag = sprintf('%s (L, blue) vs %s (R, red)', chans{1}, chans{2});
+        else
+            chanTag = chans{1};
+        end
+        title(T, sprintf('%s  |  %s  |  sorted stacks  |  %s', ...
+            strrep(dl.file.base,'_',' '), strrep(chanTag,'_',' '), ...
+            strrep(char(prep.facetby{s}),'_',' ')), 'Interpreter','none');
+
+        % Well composition: ntracks is PER WELL, so a condition backed by 3
+        % replicate wells contributes 3x the tiles. State it explicitly so
+        % conditions with different replicate counts aren't silently compared.
+        wellTxt = strjoin(arrayfun(@(a,b) sprintf('XY%d(%d)', a, b), ...
+            contribXY, contribN, 'Un', 0), ', ');
+        subtitle(T, sprintf('%d well(s): %s  |  %d traces total  |  ntracks=%d per well', ...
+            numel(contribXY), wellTxt, nTiles, p.ntracks), ...
+            'Interpreter','none', 'FontSize', max(p.font_size-1,6));
+
         fontsize(figH, p.font_size, 'points'); fontname(figH,'Calibri');
         % V5: harmonize yyaxis limits across cell tiles (per-channel)
         dl_plotstandardize(figH, 'sorted_stacks', chans, p);
+        drawnow;   % flush this facet figure to screen so the user sees it build
         % V5: sorted-stacks is a block of many single-cell tiles per facet;
         % saved as ONE file per facet (per-cell splitting would be excessive).
         % Name: base_sortedstacks_channel_facet (no timestamp; re-runs overwrite).

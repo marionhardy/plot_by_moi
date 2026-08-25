@@ -109,6 +109,18 @@ for iCellline = 1:numel(cellfn)
                                     if HasIFd && iChan < 2; PlotD.IFd{newXYNum}.data.(p.ifchan) = dataloc.IFd{ThisXY}.data.(p.ifchan); end
                                 else
                                     PlotD.d{newXYNum}.data.(ThisChan) = [PlotD.d{newXYNum}.data.(ThisChan); dataloc.d{ThisXY}.data.(ThisChan)];
+                                    % V5 BUGFIX: v4 recorded .source ONLY for the
+                                    % first well of a pooled group (the if-branch
+                                    % above). Every subsequent well's cells were
+                                    % concatenated into the data matrix but never
+                                    % into source_per_xy, so .source claimed all
+                                    % pooled cells came from one well. That broke
+                                    % provenance reporting AND any replicate-aware
+                                    % sampling downstream. Record it here too.
+                                    if iChan == 1
+                                        nRows = size(dataloc.d{ThisXY}.data.(ThisChan), 1);
+                                        source_per_xy{newXYNum} = [source_per_xy{newXYNum}; repmat(ThisXY, nRows, 1), (1:nRows)'];
+                                    end
                                     if HasZ; PlotD.z{newXYNum}.data.(ThisChan) = [PlotD.z{newXYNum}.data.(ThisChan); dataloc.z{ThisXY}.data.(ThisChan)]; end
                                     if HasIFd && iChan < 2; PlotD.IFd{newXYNum}.data.(p.ifchan) = [PlotD.IFd{newXYNum}.data.(p.ifchan); dataloc.IFd{ThisXY}.data.(p.ifchan)]; end
                                 end

@@ -54,6 +54,8 @@ addParameter(ip, 'alignzero', false, @islogical);          % V5: align yyaxis ze
 addParameter(ip, 'subset', [], @(x) isempty(x)||isnumeric(x)||iscell(x)||ischar(x));
 addParameter(ip, 'tbeforetx', [], @(x) isempty(x)||isscalar(x));
 addParameter(ip, 'tmaxaftertx', [], @(x) isempty(x)||isscalar(x));
+addParameter(ip, 'tstart', [], @(x) isempty(x)||isscalar(x));   % V5: manual window start (hours, absolute)
+addParameter(ip, 'tend', [], @(x) isempty(x)||isscalar(x));     % V5: manual window end (hours, absolute)
 addParameter(ip, 'tx_order', 1, isNNScalar);
 addParameter(ip, 'ymn', [], @(x) isnumeric(x)||iscell(x));
 addParameter(ip, 'ymx', [], @(x) isnumeric(x)||iscell(x));
@@ -110,6 +112,12 @@ end
 p.tktm = 60/looptime;
 if ~isempty(p.tmaxaftertx); p.tmaxaftertx = floor(p.tmaxaftertx * p.tktm); end
 if ~isempty(p.tbeforetx);   p.tbeforetx   = floor(p.tbeforetx   * p.tktm); end
+% V5: manual absolute window given in MINUTES -> frames (minutes / looptime,
+% where looptime is min/frame). Axis labels stay in HOURS (timeAxis divides
+% frames by p.tktm). Keep the raw minute values for the filename tag.
+p.tstart_min = p.tstart; p.tend_min = p.tend;
+if ~isempty(p.tstart); p.tstart = max(1, round(p.tstart / looptime)); end
+if ~isempty(p.tend);   p.tend   = round(p.tend   / looptime); end
 end
 
 function spec = local_wrap_spec(s)

@@ -42,6 +42,9 @@ addParameter(p, 'use_log2',  true);
 addParameter(p, 'xlabel',    '');
 addParameter(p, 'fig_pos',   []);
 addParameter(p, 'save_path', '');
+addParameter(p, 'exclude_spike', false);
+addParameter(p, 'drop_ctrl',     false);
+addParameter(p, 'max_cols',      6);   % markers per page; wrap onto more pages
 parse(p, varargin{:});
 
 markers   = p.Results.markers;
@@ -55,6 +58,9 @@ lw        = p.Results.lw;
 palette   = p.Results.colormap;
 use_log2  = p.Results.use_log2;
 fig_pos   = p.Results.fig_pos;
+
+% --- Filter cells (spike / ctrl) via shared helper ----------------------
+T = cycif_filter_cells(T, group_by, p.Results.exclude_spike, p.Results.drop_ctrl);
 
 if ~isempty(p.Results.xlabel)
     xlabel_str = p.Results.xlabel;
@@ -97,119 +103,143 @@ for mi = 1:nMk
     end
 end
 
-if isempty(fig_pos)
-    fig_pos = [40 40 min(300*nCols, 2400) 220*nRows + 60];
-end
+% --- Paginate markers: split into pages of at most max_cols markers, one
+%     figure per page, so panels stay readable with many markers. ---
+max_cols  = p.Results.max_cols;
+nPages    = ceil(nMk / max_cols);
+figs      = gobjects(nPages, 1);
 
-fig = figure('Color','w', 'Position', fig_pos, ...
-             'Name', sprintf('Distributions | group=%s facet=%s', group_by, facet_by));
+for pg = 1:nPages
+    mk_idx   = (pg-1)*max_cols + 1 : min(pg*max_cols, nMk);
+    pg_marks = markers(mk_idx);
+    pg_nMk   = numel(pg_marks);
+    pg_xlim  = col_xlim(mk_idx, :);
 
-for fi = 1:nFacet
-    if use_facet
-        Tf          = T(T.(facet_by) == facet_levels(fi), :);
-        facet_title = string(facet_levels(fi));
+    nCols = pg_nMk;
+    nRows = nFacet;
+
+    if isempty(fig_pos)
+        this_pos = [40 40 min(300*nCols, 2400) 220*nRows + 60];
     else
-        Tf          = T;
-        facet_title = '';
+        this_pos = fig_pos;
     end
 
-    for mi = 1:nMk
-        ax = subplot(nRows, nCols, (fi-1)*nCols + mi);
-        hold(ax, 'on');
+    page_tag = '';
+    if nPages > 1, page_tag = sprintf(' [page %d/%d]', pg, nPages); end
+    fig = figure('Color','w', 'Position', this_pos, ...
+                 'Name', sprintf('Distributions | group=%s facet=%s%s', ...
+                                 group_by, facet_by, page_tag));
+    figs(pg) = fig;
 
-        all_vals = Tf.(markers{mi});
-        all_vals = all_vals(~isnan(all_vals));
-        if use_log2, all_vals(~isnan(all_vals)) = log2(max(all_vals(~isnan(all_vals)), 1)); end
-        if isempty(all_vals)
-            title(ax, markers{mi}, 'Interpreter','none', 'FontSize', 8);
-            xlim(ax, col_xlim(mi,:));
-            hold(ax,'off'); continue;
-        end
-
-        % Use shared x-range for bin edges so all facets bin identically
-        edges = linspace(col_xlim(mi,1), col_xlim(mi,2), n_bins + 1);
-
-        for gi = 1:nGrp
-            v = Tf.(markers{mi})(Tf.(group_by) == grp_levels(gi));
-            v = v(~isnan(v));
-            if use_log2, v(~isnan(v)) = log2(max(v(~isnan(v)), 1)); end
-            if numel(v) < 3, continue; end
-
-            if show_hist
-                histogram(ax, v, edges, 'Normalization', norm, ...
-                          'FaceColor', cmap(gi,:), 'FaceAlpha', 0.05, ...
-                          'EdgeColor', 'none');
-            end
-
-            bw = 1.06 * std(v) * numel(v)^(-1/5);
-            if bw == 0, bw = 0.1; end
-            [f, xi] = ksdensity(v, 'Bandwidth', bw);
-
-            if strcmp(norm, 'count')
-                bin_w = edges(2) - edges(1);
-                f = f * numel(v) * bin_w;
-            elseif strcmp(norm, 'probability')
-                bin_w = edges(2) - edges(1);
-                f = f * bin_w;
-            end
-
-            fill(ax, [xi, fliplr(xi)], [f, zeros(size(f))], ...
-                 cmap(gi,:), 'FaceAlpha', alpha, 'EdgeColor', 'none');
-            plot(ax, xi, f, 'Color', cmap(gi,:), 'LineWidth', lw);
-        end
-
-        % Apply shared x-limits for this marker column
-        xlim(ax, col_xlim(mi,:));
-
-        title(ax, markers{mi}, 'Interpreter','none', 'FontSize', 9);
-        if mi == 1
-            if use_facet
-                ylabel(ax, [char(facet_title) newline norm], 'FontSize', 8, 'Interpreter','none');
-            else
-                ylabel(ax, norm, 'FontSize', 8);
-            end
+    for fi = 1:nFacet
+        if use_facet
+            Tf          = T(T.(facet_by) == facet_levels(fi), :);
+            facet_title = string(facet_levels(fi));
         else
-            ylabel(ax, '');
+            Tf          = T;
+            facet_title = '';
         end
-        xlabel(ax, xlabel_str, 'FontSize', 7, 'Interpreter','none');
-        ax.FontSize = 8;
-        grid(ax, 'on'); box(ax, 'off');
-        hold(ax, 'off');
+
+        for mj = 1:pg_nMk
+            mi = mk_idx(mj);                         % index into full marker list
+            ax = subplot(nRows, nCols, (fi-1)*nCols + mj);
+            hold(ax, 'on');
+
+            all_vals = Tf.(markers{mi});
+            all_vals = all_vals(~isnan(all_vals));
+            if use_log2, all_vals(~isnan(all_vals)) = log2(max(all_vals(~isnan(all_vals)), 1)); end
+            if isempty(all_vals)
+                title(ax, markers{mi}, 'Interpreter','none', 'FontSize', 8);
+                xlim(ax, col_xlim(mi,:));
+                hold(ax,'off'); continue;
+            end
+
+            edges = linspace(col_xlim(mi,1), col_xlim(mi,2), n_bins + 1);
+
+            for gi = 1:nGrp
+                v = Tf.(markers{mi})(Tf.(group_by) == grp_levels(gi));
+                v = v(~isnan(v));
+                if use_log2, v(~isnan(v)) = log2(max(v(~isnan(v)), 1)); end
+                if numel(v) < 3, continue; end
+
+                if show_hist
+                    histogram(ax, v, edges, 'Normalization', norm, ...
+                              'FaceColor', cmap(gi,:), 'FaceAlpha', 0.05, ...
+                              'EdgeColor', 'none');
+                end
+
+                bw = 1.06 * std(v) * numel(v)^(-1/5);
+                if bw == 0, bw = 0.1; end
+                [f, xi] = ksdensity(v, 'Bandwidth', bw);
+
+                if strcmp(norm, 'count')
+                    bin_w = edges(2) - edges(1);
+                    f = f * numel(v) * bin_w;
+                elseif strcmp(norm, 'probability')
+                    bin_w = edges(2) - edges(1);
+                    f = f * bin_w;
+                end
+
+                fill(ax, [xi, fliplr(xi)], [f, zeros(size(f))], ...
+                     cmap(gi,:), 'FaceAlpha', alpha, 'EdgeColor', 'none');
+                plot(ax, xi, f, 'Color', cmap(gi,:), 'LineWidth', lw);
+            end
+
+            xlim(ax, col_xlim(mi,:));
+            title(ax, markers{mi}, 'Interpreter','none', 'FontSize', 9);
+            if mj == 1
+                if use_facet
+                    ylabel(ax, [char(facet_title) newline norm], 'FontSize', 8, 'Interpreter','none');
+                else
+                    ylabel(ax, norm, 'FontSize', 8);
+                end
+            else
+                ylabel(ax, '');
+            end
+            xlabel(ax, xlabel_str, 'FontSize', 7, 'Interpreter','none');
+            ax.FontSize = 8;
+            grid(ax, 'on'); box(ax, 'off');
+            hold(ax, 'off');
+        end
+    end
+
+    % --- Shared legend on dedicated invisible axes ---
+    lh = gobjects(nGrp, 1);
+    for gi = 1:nGrp
+        lh(gi) = patch(NaN, NaN, cmap(gi,:), 'FaceAlpha', max(alpha, 0.4), ...
+                       'EdgeColor', cmap(gi,:), 'LineWidth', lw, ...
+                       'DisplayName', char(grp_levels(gi)));
+    end
+    ax_leg = axes(fig, 'Position',[0.92 0 0.08 1], 'Visible','off');
+    leg = legend(ax_leg, lh, 'Interpreter','none', 'FontSize', 8);
+    leg.Box   = 'off';
+    leg.Units = 'normalized';
+    leg.Position = [0.92, 0.5 - leg.Position(4)/2, leg.Position(3), leg.Position(4)];
+
+    sgtitle(fig, sprintf('CyCIF distributions  |  group: %s  |  facet: %s%s', ...
+            group_by, facet_by, page_tag), 'FontWeight','bold', 'FontSize', 11, 'Interpreter','none');
+
+    % --- Save (per page) ---
+    if ~isempty(p.Results.save_path)
+        fpath = p.Results.save_path;
+        if strcmpi(fpath(end-3:end), '.svg'), fpath = fpath(1:end-4); end
+        if nPages > 1
+            fpath = sprintf('%s_p%d.svg', fpath, pg);
+        else
+            fpath = [fpath '.svg'];
+        end
+        fig.Units             = 'inches';
+        fig_sz                = fig.Position(3:4);
+        fig.PaperUnits        = 'inches';
+        fig.PaperSize         = fig_sz;
+        fig.PaperPosition     = [0, 0, fig_sz];
+        fig.PaperPositionMode = 'manual';
+        print(fig, fpath, '-dsvg', '-painters');
+        fprintf('Saved SVG: %s\n', fpath);
     end
 end
 
-% --- Shared legend on dedicated invisible axes ----------------------------
-lh = gobjects(nGrp, 1);
-for gi = 1:nGrp
-    lh(gi) = patch(NaN, NaN, cmap(gi,:), 'FaceAlpha', max(alpha, 0.4), ...
-                   'EdgeColor', cmap(gi,:), 'LineWidth', lw, ...
-                   'DisplayName', char(grp_levels(gi)));
-end
-ax_leg = axes(fig, 'Position',[0.92 0 0.08 1], 'Visible','off');
-leg = legend(ax_leg, lh, 'Interpreter','none', 'FontSize', 8);
-leg.Box      = 'off';
-leg.Units    = 'normalized';
-leg.Position = [0.92, 0.5 - leg.Position(4)/2, leg.Position(3), leg.Position(4)];
-
-sgtitle(fig, sprintf('CyCIF distributions  |  group: %s  |  facet: %s', ...
-        group_by, facet_by), 'FontWeight','bold', 'FontSize', 11, 'Interpreter','none');
-
-% --- Save as SVG ----------------------------------------------------------
-if ~isempty(p.Results.save_path)
-    fpath = p.Results.save_path;
-    if ~strcmpi(fpath(end-3:end), '.svg'), fpath = [fpath '.svg']; end
-
-    % Fix paper size to match the screen figure exactly — prevents SVG crop
-    fig.Units            = 'inches';
-    fig_sz               = fig.Position(3:4);   % [width, height] in inches
-    fig.PaperUnits       = 'inches';
-    fig.PaperSize        = fig_sz;
-    fig.PaperPosition    = [0, 0, fig_sz];
-    fig.PaperPositionMode = 'manual';
-
-    print(fig, fpath, '-dsvg', '-painters');
-    fprintf('Saved SVG: %s\n', fpath);
-end
+fig = figs;   % return all page figures
 end
 
 

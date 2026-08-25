@@ -14,7 +14,11 @@ function [fig, emb, emb_cell_idx] = cycif_plot_embedding(T, varargin)
 %   'method'        string      'tsne'|'pca'|'umap'           (default 'tsne')
 %   'colormap'      string      'bright'|'parula'|any MATLAB map (default 'bright')
 %   'use_log2'      logical     log2(max(x,1)) before embed   (default true)
-%   'exclude_spike' logical     drop ptx_is_spike wells       (default true)
+%   'exclude_spike' logical     drop ptx_is_spike wells       (default false)
+%                               NOTE: ptx_is_spike flags Ptx-at-timepoint
+%                               wells. For designs where Ptx is a core
+%                               condition (e.g. glucose starve), these are NOT
+%                               disposable controls -- keep them (default).
 %   'max_pts'       scalar      subsample cap (Inf = none)    (default Inf)
 %   'n_neighbors'   scalar      UMAP n_neighbors              (default 15)
 %   'min_dist'      scalar      UMAP min_dist                 (default 0.1)
@@ -50,13 +54,16 @@ addParameter(p, 'facet_by',      '');
 addParameter(p, 'method',        'tsne');
 addParameter(p, 'colormap',      'bright');
 addParameter(p, 'use_log2',      true);
-addParameter(p, 'exclude_spike', true);
+addParameter(p, 'exclude_spike', false);
+addParameter(p, 'drop_ctrl',     false);
 addParameter(p, 'max_pts',       Inf);
 addParameter(p, 'n_neighbors',   15);
 addParameter(p, 'min_dist',      0.1);
 addParameter(p, 'alpha',         0.4);
 addParameter(p, 'mksz',          8);
 addParameter(p, 'max_nan_frac',  1.0);
+addParameter(p, 'min_marker_frac', 0.5);   % per-cell completeness floor (fraction of markers measured)
+addParameter(p, 'keep_cells',    []);      % optional external cell keep-list (e.g. from QC.survived_good), overrides min_marker_frac
 addParameter(p, 'impute_nan',    'none');  % 'none'|'lowerquantile'|'median'
 addParameter(p, 'perplexity',    30);
 addParameter(p, 'seed',          0);
@@ -71,12 +78,15 @@ method_req     = lower(p.Results.method);
 palette        = p.Results.colormap;
 use_log2       = p.Results.use_log2;
 exclude_spike  = p.Results.exclude_spike;
+drop_ctrl      = p.Results.drop_ctrl;
 max_pts        = p.Results.max_pts;
 n_neighbors    = p.Results.n_neighbors;
 min_dist       = p.Results.min_dist;
 alpha          = p.Results.alpha;
 mksz           = p.Results.mksz;
 max_nan_frac   = p.Results.max_nan_frac;
+min_marker_frac = p.Results.min_marker_frac;
+keep_cells     = p.Results.keep_cells;
 impute_nan     = lower(p.Results.impute_nan);
 perplexity     = p.Results.perplexity;
 seed           = p.Results.seed;
@@ -93,17 +103,30 @@ if any(~keep)
     fprintf('  %s\n', markers{~keep});
 end
 markers = markers(keep);
-assert(~isempty(markers), 'No markers survive NaN filter — lower max_nan_frac.');
+
+% --- Always drop degenerate columns (independent of max_nan_frac) --------
+% All-NaN columns (e.g. unacquired control stains) and zero-variance columns
+% carry no information AND break downstream steps: an all-NaN column makes the
+% impute_nan='none' row-drop (all(~isnan,2)) reject EVERY cell, collapsing the
+% feature matrix and the PCA. max_nan_frac's default (1.0) does not catch
+% 100%-NaN columns, so filter them explicitly here.
+allnan = cellfun(@(m) all(isnan(T.(m))), markers);
+zerov  = cellfun(@(m) local_nzvar(T.(m)) == 0, markers);
+degen  = allnan | zerov;
+if any(degen)
+    fprintf('[cycif_plot_embedding] Dropping %d degenerate markers (all-NaN or zero-variance):\n', ...
+            sum(degen));
+    fprintf('  %s\n', strjoin(markers(degen), ', '));
+end
+markers = markers(~degen);
+assert(~isempty(markers), 'No markers survive NaN/variance filter — check the linked table.');
+assert(numel(markers) >= 2, ...
+    ['[cycif_plot_embedding] Only %d usable marker column(s) after filtering; ' ...
+     'need >=2 for a 2D embedding.'], numel(markers));
 nMk = numel(markers);
 
-% --- Filter spike wells --------------------------------------------------
-if exclude_spike && ismember('ptx_is_spike', T.Properties.VariableNames)
-    n_spike = sum(T.ptx_is_spike);
-    if n_spike > 0
-        warning('[cycif_plot_embedding] Excluding %d spike-treatment cells. Pass ''exclude_spike'',false to include.', n_spike);
-    end
-    T = T(~T.ptx_is_spike, :);
-end
+% --- Filter cells (spike / ctrl) via shared helper ----------------------
+T = cycif_filter_cells(T, group_by, exclude_spike, drop_ctrl);
 
 % --- Build marker matrix -------------------------------------------------
 Xmat = table2array(T(:, markers));
@@ -111,6 +134,78 @@ if use_log2
     nz = ~isnan(Xmat);
     Xmat(nz) = log2(max(Xmat(nz), 1));
 end
+
+% --- Cell completeness / followability filter (BEFORE imputation) --------
+% Heavily-NaN cells (poor followability: measured/well-registered in few
+% rounds) otherwise get imputed to identical per-marker constants, collapsing
+% into one giant identical point. That breaks tSNE's perplexity binary search
+% (zero-distance neighbors) and forms an artifactual central blob. Drop those
+% cells here, before imputation, so only followable cells are embedded.
+%
+% Two mechanisms (keep_cells overrides min_marker_frac when provided):
+%   keep_cells       explicit cell keep-list. Either logical [height(T)x1], or
+%                    numeric row indices into T, or a table with xy+cellid
+%                    (e.g. built from QC.survived_good >= threshold).
+%   min_marker_frac  keep cells with at least this fraction of markers measured
+%                    (non-NaN). Default 0.5.
+frac_measured = mean(~isnan(Xmat), 2);
+nCellsIn = numel(frac_measured);
+
+% Completeness distribution (per-cell fraction of markers measured), so the
+% threshold choice is evidence-based.
+fprintf('[cycif_plot_embedding] --- Cell completeness (fraction of %d markers measured) ---\n', nMk);
+bands = [0 0.25 0.50 0.75 1.0001];
+blab  = {'  0-25%','  25-50%',' 50-75%','75-100%'};
+for b = 1:numel(bands)-1
+    inb = frac_measured >= bands(b) & frac_measured < bands(b+1);
+    fprintf('    %s : %6d cells (%.1f%%)\n', blab{b}, sum(inb), 100*mean(inb));
+end
+fprintf('    fully measured (100%%): %6d cells (%.1f%%)\n', ...
+        sum(frac_measured>=1), 100*mean(frac_measured>=1));
+fprintf('    median completeness: %.0f%% | mean: %.0f%%\n', ...
+        100*median(frac_measured), 100*mean(frac_measured));
+
+if ~isempty(keep_cells)
+    keep_row = local_resolve_keeplist(keep_cells, T);
+    fprintf('[cycif_plot_embedding] External keep-list applied: %d of %d cells retained (%d dropped, %.1f%%).\n', ...
+            sum(keep_row), nCellsIn, sum(~keep_row), 100*mean(~keep_row));
+    fprintf('    completeness of KEPT cells:     median %.0f%% (min %.0f%%)\n', ...
+            100*median(frac_measured(keep_row)), 100*min(frac_measured(keep_row)));
+    if any(~keep_row)
+        fprintf('    completeness of DROPPED cells:  median %.0f%% (max %.0f%%)\n', ...
+                100*median(frac_measured(~keep_row)), 100*max(frac_measured(~keep_row)));
+    end
+else
+    keep_row = frac_measured >= min_marker_frac;
+    fprintf('[cycif_plot_embedding] Completeness filter (>=%.0f%% markers): %d of %d retained (%d dropped, %.1f%%).\n', ...
+            100*min_marker_frac, sum(keep_row), nCellsIn, sum(~keep_row), 100*mean(~keep_row));
+end
+
+% Duplicate-collapse warning: report how many of the DROPPED cells would have
+% imputed to (near-)identical rows -- the tSNE-breaking population.
+if any(~keep_row)
+    dmin = min(frac_measured(~keep_row)); dmed = median(frac_measured(~keep_row));
+    fprintf('    (dropped cells are the low-completeness tail that imputes to identical rows;\n');
+    fprintf('     dropped completeness range %.0f%%-%.0f%%, would otherwise collapse the embedding.)\n', ...
+            100*dmin, 100*max(frac_measured(~keep_row)));
+end
+
+% Per-marker retained coverage: after the cell filter, how well is each marker
+% actually measured? Flags markers that are still mostly imputed.
+kept_cov = mean(~isnan(Xmat(keep_row,:)), 1);
+[cov_sorted, ord] = sort(kept_cov);
+nshow = min(5, nMk);
+fprintf('    lowest-coverage markers among kept cells:\n');
+for i = 1:nshow
+    fprintf('       %-16s %.0f%% measured\n', markers{ord(i)}, 100*cov_sorted(i));
+end
+
+assert(sum(keep_row) >= 2, ...
+    ['[cycif_plot_embedding] Only %d cells pass the completeness/keep filter; ' ...
+     'lower ''min_marker_frac'' or widen ''keep_cells''.'], sum(keep_row));
+T    = T(keep_row, :);
+Xmat = Xmat(keep_row, :);
+fprintf('[cycif_plot_embedding] Embedding %d cells x %d markers.\n', height(T), nMk);
 
 % --- NaN imputation for embedding ---------------------------------------
 % Unstained wells have NaN — they must be filled before embedding.
@@ -344,6 +439,38 @@ function markers = i_auto_markers(T)
     is_num  = cellfun(@(c) isnumeric(T.(c)) && ~islogical(T.(c)), cols);
     is_id   = ismember(cols, {'xy','cellid','ptx_is_spike'});
     markers = cols(is_num & ~is_id);
+end
+
+function v = local_nzvar(col)
+% Variance of the non-NaN entries; 0 if fewer than 2 valid values.
+c = col(~isnan(col));
+if numel(c) < 2; v = 0; else; v = var(c); end
+end
+
+function keep = local_resolve_keeplist(keep_cells, T)
+% Resolve an external cell keep-list into a logical mask over the rows of T.
+% Accepts: logical [height(T)x1]; numeric row indices into T; or a table with
+% 'xy' and 'cellid' columns (matched against T.xy / T.cellid). The table form
+% is the natural bridge from QC output, e.g.:
+%   keep_tbl = QC_cell_table(QC.survived_good >= thr, {'xy','cellid'})
+n = height(T);
+if islogical(keep_cells)
+    assert(numel(keep_cells)==n, ...
+        'keep_cells logical length (%d) must equal height(T) (%d).', numel(keep_cells), n);
+    keep = keep_cells(:);
+elseif isnumeric(keep_cells)
+    keep = false(n,1);
+    valid = keep_cells(keep_cells>=1 & keep_cells<=n);
+    keep(round(valid)) = true;
+elseif istable(keep_cells)
+    assert(all(ismember({'xy','cellid'}, keep_cells.Properties.VariableNames)), ...
+        'keep_cells table must have ''xy'' and ''cellid'' columns.');
+    key_T    = string(T.xy) + "_" + string(T.cellid);
+    key_keep = string(keep_cells.xy) + "_" + string(keep_cells.cellid);
+    keep = ismember(key_T, key_keep);
+else
+    error('keep_cells must be logical, numeric indices, or an xy+cellid table.');
+end
 end
 
 function cmap = i_colormap(n, palette)

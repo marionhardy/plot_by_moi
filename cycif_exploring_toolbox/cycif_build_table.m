@@ -23,8 +23,10 @@ function T = cycif_build_table(dataloc, comp)
 %          ptx_name, ptx_conc, ptx_units, ptx_time, ptx_timeunit, ptx_label,
 %          ptx_pool_label, ptx_is_spike,
 %          tx1_name ... txN_name (dynamic, one set per treatment slot),
-%          tx1_label  (all treatment names combined, e.g. 'IFNg+LPS+HC')
-%          condition  (ptx_pool_label + ' | ' + tx1_label, for cellxgene color-by)
+%          tx1_label ... txN_label  (per-slot label, name+conc+units,
+%                                    e.g. 'Glucose 17mM', 'IFNg 20ng'),
+%          tx_all_label (all treatment names joined, e.g. 'Glucose+IFNg'),
+%          condition  (ptx_pool_label + ' | ' + tx_all_label, cellxgene color-by)
 %
 %   Marker column names: '<marker>_<compartment>' (e.g. 'GFP_nuc', 'GFP_cyt',
 %   'GFP_ratio_cn'). Compartment order in the table follows the order in
@@ -211,11 +213,11 @@ T = [table(Tmeta.xy, cellid, 'VariableNames', {'xy','cellid'}), ...
      Tmeta(:, setdiff(Tmeta.Properties.VariableNames, {'xy'}, 'stable'))];
 
 % Add combined condition label for cellxgene color-by.
-% e.g. 'Glucose 17mM | IFNg+LPS+HC'
-T.condition = T.ptx_pool_label + ' | ' + T.tx1_label;
+% e.g. 'Glucose 17mM | IFNg+LPS+HC'  (ptx pool + ALL treatment slots joined)
+T.condition = T.ptx_pool_label + ' | ' + T.tx_all_label;
 
-fprintf('[cycif_build_table] %d cells | %d unique tx1_labels | %d unique conditions\n', ...
-        height(T), numel(unique(T.tx1_label)), numel(unique(T.condition)));
+fprintf('[cycif_build_table] %d cells | %d unique tx combos | %d unique conditions\n', ...
+        height(T), numel(unique(T.tx_all_label)), numel(unique(T.condition)));
 end
 
 
@@ -274,24 +276,64 @@ tx_field_names = tx_field_names( ...
 [~, tx_order] = sort(cellfun(@(s) sscanf(s, 'Tx%d'), tx_field_names));
 tx_field_names = tx_field_names(tx_order);
 
-tx_names  = {};
-tx_concs  = {};
-tx_units  = {};
-tx_times  = {};
-tx_tunits = {};
+% Each Tx<N> field maps to ONE output column set tx<N>_*. A Tx round may hold
+% MULTIPLE sub-treatments (consecutive 5-layer blocks, e.g. Tx2 = IFNg + LPS as
+% a polarization cocktail). Those sub-treatments are COMBINED into that round's
+% name/conc/label rather than split across tx-numbered columns -- flattening to
+% a global counter (the old behavior) misfiled Tx2's 2nd sub-treatment as tx3
+% and dropped it from tx2_label.
+% Each Tx<N> field maps to ONE output column set tx<N>_*. A Tx round may hold
+% MULTIPLE simultaneous sub-treatments (consecutive 5-layer blocks), e.g.
+% Tx2 = IFNg + LPS, or a 4-way cocktail IFNg + LPS + IL4 + HC. All are combined
+% into that round's label. Per-sub-treatment label text ('name conc units') is
+% built for each component, then the complete components are joined with ' + '
+% -- so concentrations stay attached to their own treatment regardless of how
+% many components there are (up to 4+), instead of joining names/concs/units in
+% separate streams (which mislabels 'IFNg+LPS 20+100ng+ng').
+tx_names     = {};   % per-block: names joined ('IFNg+LPS')
+tx_concs     = {};   % per-block: first sub-conc (kept for column back-compat)
+tx_units     = {};
+tx_times     = {};
+tx_tunits    = {};
+tx_slot_lbls = {};   % per-block: full label ('IFNg 20ng + LPS 100ng')
 for it = 1:numel(tx_field_names)
     Tx = pmd.(tx_field_names{it});
-    n_slots_here = floor(size(Tx, 3) / 5);
-    for k = 1:n_slots_here
+    n_sub = floor(size(Tx, 3) / 5);
+
+    sub_names = {}; sub_concs = {}; sub_units = {}; sub_times = {}; sub_tunits = {};
+    sub_lbls  = {};
+    for k = 1:n_sub
         base = (k-1)*5;
-        tx_names{end+1}  = strtrim(safe(Tx, r,c, base+1)); %#ok<AGROW>
-        tx_concs{end+1}  = strtrim(safe(Tx, r,c, base+2)); %#ok<AGROW>
-        tx_units{end+1}  = strtrim(safe(Tx, r,c, base+3)); %#ok<AGROW>
-        tx_times{end+1}  = strtrim(safe(Tx, r,c, base+4)); %#ok<AGROW>
-        tx_tunits{end+1} = strtrim(safe(Tx, r,c, base+5)); %#ok<AGROW>
+        nm = strtrim(safe(Tx, r,c, base+1));
+        if isempty(nm); continue; end          % skip empty padding sub-blocks
+        cc = strtrim(safe(Tx, r,c, base+2));
+        un = strtrim(safe(Tx, r,c, base+3));
+        tm = strtrim(safe(Tx, r,c, base+4));
+        tu = strtrim(safe(Tx, r,c, base+5));
+        sub_names{end+1}  = nm;  sub_concs{end+1} = cc; sub_units{end+1} = un; %#ok<AGROW>
+        sub_times{end+1}  = tm;  sub_tunits{end+1} = tu;                       %#ok<AGROW>
+        % per-component label: 'name conc units' (conc/units appended only if
+        % the conc is real, so a bare 'IFNg' stays 'IFNg').
+        lbl = nm;
+        if ~isempty(cc) && ~isempty(regexprep(cc, '[\s]', ''))
+            lbl = [lbl ' ' cc un]; %#ok<AGROW>
+        end
+        sub_lbls{end+1} = strtrim(lbl); %#ok<AGROW>
+    end
+
+    if isempty(sub_names)
+        tx_names{end+1}='';  tx_concs{end+1}='';  tx_units{end+1}=''; %#ok<AGROW>
+        tx_times{end+1}='';  tx_tunits{end+1}=''; tx_slot_lbls{end+1}='none'; %#ok<AGROW>
+    else
+        tx_names{end+1}     = strjoin(sub_names, '+');   %#ok<AGROW> % 'IFNg+LPS'
+        tx_concs{end+1}     = sub_concs{1};              %#ok<AGROW> % first (raw col)
+        tx_units{end+1}     = sub_units{1};              %#ok<AGROW>
+        tx_times{end+1}     = sub_times{1};              %#ok<AGROW>
+        tx_tunits{end+1}    = sub_tunits{1};             %#ok<AGROW>
+        tx_slot_lbls{end+1} = strjoin(sub_lbls, ' + ');  %#ok<AGROW> % 'IFNg 20ng + LPS 100ng'
     end
 end
-nTx1_slots = numel(tx_names);   % keep the same name for downstream loop
+nTx1_slots = numel(tx_names);   % = number of Tx BLOCKS (one col set each)
 
 % Combined label: all non-empty treatment names joined with '+'
 non_empty = tx_names(~cellfun(@isempty, tx_names));
@@ -308,12 +350,20 @@ var_vals  = {string(ptx_name), string(ptx_conc), string(ptx_units), ...
 
 for k = 1:nTx1_slots
     prefix = sprintf('tx%d', k);
+    % Per-slot label was built above as the join of complete per-component
+    % labels ('IFNg 20ng + LPS 100ng'), so concentrations stay attached to
+    % their own treatment for cocktails of any size (up to 4+).
+    slot_label = tx_slot_lbls{k};
     var_names = [var_names, {[prefix '_name'],[prefix '_conc'], ...
-                              [prefix '_units'],[prefix '_time'],[prefix '_timeunit']}]; %#ok<AGROW>
+                              [prefix '_units'],[prefix '_time'],[prefix '_timeunit'], ...
+                              [prefix '_label']}]; %#ok<AGROW>
     var_vals  = [var_vals,  {string(tx_names{k}), string(tx_concs{k}), ...
-                              string(tx_units{k}), string(tx_times{k}), string(tx_tunits{k})}]; %#ok<AGROW>
+                              string(tx_units{k}), string(tx_times{k}), string(tx_tunits{k}), ...
+                              string(slot_label)}]; %#ok<AGROW>
 end
-var_names{end+1} = 'tx1_label';
+% Combined ALL-slots label (every treatment name joined with '+', e.g.
+% 'Glucose+IFNg') -- kept for backwards compatibility / condition string.
+var_names{end+1} = 'tx_all_label';
 var_vals{end+1}  = string(tx1_label);
 
 cond = table(var_vals{:}, 'VariableNames', var_names);

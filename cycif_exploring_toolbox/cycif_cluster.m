@@ -12,7 +12,12 @@ function [T, cluster_labels] = cycif_cluster(T, emb, varargin)
 %   'k'             scalar    number of clusters for k-means  (default 8)
 %   'epsilon'       scalar    DBSCAN neighborhood radius      (default auto)
 %   'min_pts'       scalar    DBSCAN min neighbors            (default 10)
-%   'exclude_spike' logical   drop ptx_is_spike wells         (default true)
+%   'exclude_spike' logical   drop ptx_is_spike wells         (default false)
+%                             MUST match the exclude_spike used in
+%                             cycif_plot_embedding when 'emb' was generated --
+%                             this reconstructs which T rows map to emb rows.
+%                             Both default to false (Ptx is often a core
+%                             condition, e.g. glucose starve, not a control).
 %                             must match setting in cycif_plot_embedding
 %   'group_by'      string    T column for condition panel     (default 'tx1_label')
 %   'colormap'      string    cluster colormap                 (default 'bright')
@@ -33,7 +38,7 @@ function [T, cluster_labels] = cycif_cluster(T, emb, varargin)
 %   [T, labels] = cycif_cluster(T, emb, 'method','dbscan', 'epsilon',3);
 
 p = inputParser();
-addParameter(p, 'exclude_spike', true);
+addParameter(p, 'exclude_spike', false);
 addParameter(p, 'method',    'both');
 addParameter(p, 'k',         8);
 addParameter(p, 'epsilon',   []);
@@ -97,7 +102,11 @@ fprintf('[cycif_cluster] Primary labels from %s: %d unique clusters\n', ...
 % --- Add cluster column to T by row-order matching -----------------------
 T.cluster = repmat("unassigned", height(T), 1);
 
-if exclude_spike && ismember('ptx_is_spike', T.Properties.VariableNames)
+if exclude_spike && ismember('ptx_is_spike', T.Properties.VariableNames) ...
+        && sum(T.ptx_is_spike) < height(T)
+    % Spike cells were excluded from the embedding -- align to non-spike rows.
+    % (If ALL cells are spike, cycif_plot_embedding's guard keeps them all, so
+    %  we must NOT filter here either, or the row counts won't match.)
     emb_rows = find(~T.ptx_is_spike);
 else
     emb_rows = (1:height(T))';
@@ -245,11 +254,27 @@ function i_scatter_clusters(ax, emb, labels, uniq, cmap, xlims, ylims, alpha, mk
     ax.DataAspectRatio = [1 1 1];
     grid(ax,'off'); box(ax,'off');
     set(ax, 'XTick',[], 'YTick',[]);
-    if numel(uniq) <= 20
-        leg = legend(ax, 'Location','eastoutside', 'Interpreter','none', 'FontSize',7);
+    % Legend: always show the cluster->color mapping. For many clusters, use a
+    % compact multi-column layout (and smaller font) rather than dropping the
+    % legend entirely -- a missing legend loses the cluster identity.
+    nU = numel(uniq);
+    if nU <= 60
+        if nU <= 12
+            ncol = 1; fs = 7;
+        elseif nU <= 30
+            ncol = 2; fs = 6;
+        else
+            ncol = 3; fs = 5;
+        end
+        leg = legend(ax, 'Location','eastoutside', 'Interpreter','none', ...
+                     'FontSize', fs, 'NumColumns', ncol);
         leg.Box = 'off';
     else
+        % Beyond ~60 entries even a multi-column legend is unreadable; annotate
+        % the count instead so the omission is explicit, not silent.
         legend(ax, 'off');
+        title(ax, sprintf('%s (%d clusters — legend omitted)', ttl, nU), ...
+              'Interpreter','none', 'FontSize', 10);
     end
     hold(ax, 'off');
 end
@@ -293,10 +318,8 @@ function i_plot_heatmap(T, labels, uniq, markers, method_name, fig_pos, save_pat
         Z_col   = []; col_ord = 1;
     end
 
-    hmat_plot  = hmat_z(row_ord, col_ord);
-    row_labels = arrayfun(@(i) sprintf('%s (n=%d)', uniq(row_ord(i)), ncells(row_ord(i))), ...
-                          (1:nC)', 'UniformOutput', false);
-    col_labels = markers(col_ord);
+    % (hmat_plot / row_labels / col_labels are built AFTER the row dendrogram
+    %  below, so the heatmap row order matches the dendrogram's drawn leaves.)
 
     % --- Figure layout: col dendrogram | heatmap | colorbar ---
     fig_w = max(700, nMk*45 + 180);
@@ -321,17 +344,28 @@ function i_plot_heatmap(T, labels, uniq, markers, method_name, fig_pos, save_pat
         ax_dcol.Color = 'none';
     end
 
-    % Row dendrogram
+    % Row dendrogram. Capture the ACTUAL leaf order the dendrogram draws
+    % (perm, bottom->top) and use it to order the heatmap rows, so the tree
+    % and the heatmap always agree. 'right' orientation draws leaves
+    % bottom-to-top; imagesc draws row 1 at top, so we flip perm for the
+    % heatmap (top row = last-drawn leaf).
+    row_perm = row_ord;   % fallback if no dendrogram
     if ~isempty(Z_row)
         ax_drow = axes(hfig, 'Position', dend_row_pos);
-        dendrogram(ax_drow, Z_row, 0, ...
+        [~, ~, row_perm] = dendrogram(ax_drow, Z_row, 0, ...
                    'Reorder', row_ord, 'Orientation','right');
         ax_drow.XTick = []; ax_drow.YTick = [];
         ax_drow.Box = 'off'; ax_drow.YColor = 'none';
         ax_drow.Color = 'none';
-        % Flip Y so row 1 is at top (matches imagesc)
-        ax_drow.YDir = 'reverse';
     end
+    % Heatmap row order = dendrogram leaves top-to-bottom. dendrogram 'right'
+    % returns perm bottom-to-top, so reverse it to match imagesc (row 1 = top).
+    heat_row_order = flipud(row_perm(:));
+
+    hmat_plot  = hmat_z(heat_row_order, col_ord);
+    row_labels = arrayfun(@(i) sprintf('%s (n=%d)', uniq(heat_row_order(i)), ncells(heat_row_order(i))), ...
+                          (1:nC)', 'UniformOutput', false);
+    col_labels = markers(col_ord);
 
     % Heatmap
     ax = axes(hfig, 'Position', heat_pos);

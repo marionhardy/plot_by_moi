@@ -17,6 +17,11 @@ if isempty(markers), markers = i_auto_markers(T); end
 max_pts = i_getopt(opts, 'max_pts', 2000);
 alpha   = i_getopt(opts, 'alpha',   0.3);
 mksz    = i_getopt(opts, 'mksz',    4);
+exclude_spike = i_getopt(opts, 'exclude_spike', false);
+drop_ctrl     = i_getopt(opts, 'drop_ctrl',     false);
+
+% --- Filter cells (spike / ctrl) via shared helper ----------------------
+T = cycif_filter_cells(T, group_by, exclude_spike, drop_ctrl);
 
 grp_levels = unique(T.(group_by), 'stable');
 nGrp = numel(grp_levels);

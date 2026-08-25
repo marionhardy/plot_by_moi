@@ -59,16 +59,30 @@ for iSpec = 1:numel(p.channel)
         % sized to a fixed per-tile dimension (tiles stay the same size
         % whether you ask for 10, 50, or 100 cells; the figure grows). ---
         nTiles = 0;
+        contribXY = [];      % which wells actually contribute tiles
+        contribN  = [];      % how many tiles each contributes
         for g = 1:numel(prep.groupby)
             xys = intersect(prep.idx.(prep.facetby{s}), prep.idx.(prep.groupby{g}));
             for xy = xys(:)'
                 if xy > numel(dl.d) || isempty(dl.d{xy}) || ~isfield(dl.d{xy}.data, chans{1}); continue; end
                 if ~prep.goodxy(xy); continue; end
-                nCells = size(dl.d{xy}.data.(chans{1}),1);
-                if ~isempty(p.ncells) && p.ncells <= nCells; nCells = p.ncells; end
-                nWant = p.ntracks * p.nstacks;
-                if nCells < nWant; nWant = floor(nCells/p.nstacks)*p.nstacks; end
-                nTiles = nTiles + nWant;
+                nAvail = size(dl.d{xy}.data.(chans{1}),1);
+                nWantP = p.ntracks * p.nstacks;
+                if ~isempty(p.ncells); nWantP = min(nWantP, p.ncells); end
+                nWantP = min(nWantP, nAvail);
+                % per-replicate breakdown (mirrors the stratified draw below)
+                if isfield(dl.d{xy},'source') && ~isempty(dl.d{xy}.source)
+                    srcXY0 = dl.d{xy}.source(:,1);
+                else
+                    srcXY0 = repmat(xy, nAvail, 1);
+                end
+                reps0  = unique(srcXY0,'stable');
+                perRep0 = floor(nWantP / numel(reps0));
+                for r = 1:numel(reps0)
+                    contribXY(end+1) = reps0(r);                                  %#ok<AGROW>
+                    contribN(end+1)  = min(perRep0, sum(srcXY0==reps0(r)));       %#ok<AGROW>
+                end
+                nTiles = nTiles + nWantP;
             end
         end
         if nTiles == 0; continue; end
@@ -92,38 +106,72 @@ for iSpec = 1:numel(p.channel)
 
                 tw = R.timeWindow(dl, xy, chans{1}, prep.linetp{cellfun(@(v)any(v==xy),prep.xymat)}, p);
 
-                % how many cells this block: cap to availability
-                nCells = size(dl.d{xy}.data.(chans{1}),1);
-                if ~isempty(p.ncells) && p.ncells <= nCells; nCells = p.ncells; end
-                nWant = p.ntracks * p.nstacks;
-                if nCells < nWant; nWant = floor(nCells/p.nstacks)*p.nstacks; end
+                % --- Replicate-stratified sampling -----------------------
+                % combinexys pools technical replicates into one pseudo-xy,
+                % so a single global NaN-ranking would draw most/all tiles
+                % from whichever well happened to segment best. Instead:
+                % split ntracks equally across the contributing wells, rank
+                % by NaN-completeness WITHIN each, and keep replicate blocks
+                % contiguous so boundaries are visible.
+                Dfull  = dl.d{xy}.data.(chans{1})(:, tw.firsttp:tw.tracklength);
+                nanCnt = sum(isnan(Dfull), 2);
 
-                % sort by NaN-completeness over the plotted window (v4 logic)
-                [~,I] = sort(sum(isnan(dl.d{xy}.data.(chans{1})(:, tw.firsttp:tw.tracklength)),2));
+                if isfield(dl.d{xy},'source') && ~isempty(dl.d{xy}.source)
+                    srcXY = dl.d{xy}.source(:,1);          % original well per cell
+                else
+                    srcXY = repmat(xy, size(Dfull,1), 1);  % not pooled
+                end
+                reps   = unique(srcXY, 'stable');
+                nReps  = numel(reps);
+                nWant  = p.ntracks * p.nstacks;
+                if ~isempty(p.ncells); nWant = min(nWant, p.ncells); end
+                perRep = floor(nWant / nReps);             % equal split
+
+                I = [];
+                for r = 1:nReps
+                    idxR   = find(srcXY == reps(r));
+                    [~,ord] = sort(nanCnt(idxR));          % rank within replicate
+                    take   = min(perRep, numel(idxR));
+                    I      = [I; idxR(ord(1:take))];       %#ok<AGROW> blocks stay contiguous
+                end
+                % top up from the best remaining tracks if equal split left a
+                % shortfall (e.g. a replicate had fewer cells than perRep)
+                if numel(I) < nWant
+                    rest = setdiff((1:size(Dfull,1))', I, 'stable');
+                    [~,ord] = sort(nanCnt(rest));
+                    I = [I; rest(ord(1:min(nWant-numel(I), numel(rest))))];
+                end
+                nWant = numel(I);
+                % ---------------------------------------------------------
 
                 for k = 1:nWant
                     AH = nexttile(T); hold(AH,'on');
+                    xf = tw.firsttp:tw.tracklength;   % absolute frame numbers (x-data)
                     for c = 1:nCh
                         if nCh > 1; if c==1; yyaxis(AH,'left'); else; yyaxis(AH,'right'); end; end
                         D = dl.d{xy}.data.(chans{c})(:, tw.firsttp:tw.tracklength);
                         if ~isempty(p.smooth); D = movmean(D, p.smooth, 2); end
                         rules = R.formatRules(chans{c});
-                        plot(AH, D(I(k),:), 'Color', rules.CmapColor, 'LineStyle','-');
+                        plot(AH, xf, D(I(k),:), 'Color', rules.CmapColor, 'LineStyle','-');
                         set(AH,'YColor','k');
                         if iscell(p.ymn) && numel(p.ymn)>=c; ylim(AH,[p.ymn{c}, p.ymx{c}]); end
                     end
 
-                    % title = "Cell <origID>" (recover ID through .source)
+                    % title = "Cell <origID> (XY n)" -- XY makes each tile
+                    % self-identifying, so a condition backed by 3 replicate
+                    % wells is visibly distinguishable from one backed by 1.
                     if isfield(dl.d{xy},'source') && ~isempty(dl.d{xy}.source) && I(k) <= size(dl.d{xy}.source,1)
-                        cid = dl.d{xy}.source(I(k),2);
+                        cid    = dl.d{xy}.source(I(k),2);   % original cell id
+                        origXY = dl.d{xy}.source(I(k),1);   % original well (pre-combine)
                     else
-                        cid = I(k);
+                        cid    = I(k);
+                        origXY = xy;
                     end
-                    title(AH, sprintf('Cell %d', cid), 'FontWeight','normal');
+                    title(AH, sprintf('Cell %d (XY%d)', cid, origXY), 'FontWeight','normal');
 
                     R.txLines(AH, tw);
                     R.timeAxis(AH, tw, p);
-                    xlim(AH, [tw.firsttp-1, tw.tracklength]);
+                    xlim(AH, [tw.firsttp, tw.tracklength]);   % exact crop, no blank pad
                     R.styleTile(AH, nCh);      % declutter: thin ticks, drop repeated y-labels
                     hold(AH,'off');
                 end
@@ -141,6 +189,16 @@ for iSpec = 1:numel(p.channel)
         title(T, sprintf('%s  |  %s  |  sorted stacks  |  %s', ...
             strrep(dl.file.base,'_',' '), strrep(chanTag,'_',' '), ...
             strrep(char(prep.facetby{s}),'_',' ')), 'Interpreter','none');
+
+        % Well composition: ntracks is PER WELL, so a condition backed by 3
+        % replicate wells contributes 3x the tiles. State it explicitly so
+        % conditions with different replicate counts aren't silently compared.
+        wellTxt = strjoin(arrayfun(@(a,b) sprintf('XY%d(%d)', a, b), ...
+            contribXY, contribN, 'Un', 0), ', ');
+        subtitle(T, sprintf('%d replicate well(s): %s  |  %d traces total  |  ntracks=%d split equally, NaN-ranked within each well', ...
+            numel(contribXY), wellTxt, nTiles, p.ntracks), ...
+            'Interpreter','none', 'FontSize', max(p.font_size-1,6));
+
         fontsize(figH, p.font_size, 'points'); fontname(figH,'Calibri');
         % V5: harmonize yyaxis limits across cell tiles (per-channel)
         dl_plotstandardize(figH, 'sorted_stacks', chans, p);
@@ -148,8 +206,17 @@ for iSpec = 1:numel(p.channel)
         % V5: sorted-stacks is a block of many single-cell tiles per facet;
         % saved as ONE file per facet (per-cell splitting would be excessive).
         % Name: base_sortedstacks_channel_facet (no timestamp; re-runs overwrite).
-        R.exportSVG(figH, dl, sprintf('sortedstacks_%s_%s', ...
-            strjoin(chans,'-'), char(prep.facetby{s})), p);
+        % V5: encode the manual time window (minutes) in the filename so
+        % different window "forks" of the same condition save to distinct files.
+        winTag = '';
+        if ~isempty(p.tstart_min) || ~isempty(p.tend_min)
+            lo = ''; hi = '';
+            if ~isempty(p.tstart_min); lo = num2str(p.tstart_min); end
+            if ~isempty(p.tend_min);   hi = num2str(p.tend_min);   end
+            winTag = sprintf('_t%s-%smin', lo, hi);
+        end
+        R.exportSVG(figH, dl, sprintf('sortedstacks_%s_%s%s', ...
+            strjoin(chans,'-'), char(prep.facetby{s}), winTag), p);
         if p.closefigs && p.save; close(figH); end   % V5: guard on save (v4 closed unconditionally but assumed saving)
     end
 end
