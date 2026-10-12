@@ -443,12 +443,12 @@ end
 
 % beautify treatment names for labels
 % remove extra spaces in name caused by NaNs to make pretty names
-treatments = arrayfun(@(x)regexprep(treatments{x},char(0),''),1:size(treatments),'un',0)';
-treatments = arrayfun(@(x)regexprep(treatments{x},'(^|\s)',''),1:size(treatments),'un',0)';
+treatments = arrayfun(@(x)regexprep(treatments{x},char(0),''),1:numel(treatments),'un',0)';
+treatments = arrayfun(@(x)regexprep(treatments{x},'(^|\s)',''),1:numel(treatments),'un',0)';
 % remove double +s
-treatments = arrayfun(@(x)regexprep(treatments{x},'++','+'),1:size(treatments),'un',0)';
+treatments = arrayfun(@(x)regexprep(treatments{x},'++','+'),1:numel(treatments),'un',0)';
 % replace _ with ' ' 
-treatments = arrayfun(@(x)regexprep(treatments{x},'_',' '),1:size(treatments),'un',0)';
+treatments = arrayfun(@(x)regexprep(treatments{x},'_',' '),1:numel(treatments),'un',0)';
 
 % FIX determine if end point controls were used, if so, remove that from the
 % titles and plotted data, also self normalized for the cell

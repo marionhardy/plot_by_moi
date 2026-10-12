@@ -70,8 +70,19 @@ def main(csv_dir, out_path):
     adata      = ad.AnnData(X=X, obs=obs_df, var=var_df)
     adata.var_names = X_df.columns.tolist()
 
-    # Store raw so cellxgene's 'Use Raw' checkbox shows un-normalized values
-    adata.raw = adata
+    # Clear the var index name. cellxgene VIP serializes var with an '_index'
+    # column when index.name is set, which collides with its gene lookup and
+    # yields "No matching genes" even though var_names are correct. Keeping the
+    # index name as None avoids that collision (see cellxgene_VIP helpful-tips).
+    adata.var.index.name = None
+
+    # Store raw so cellxgene's 'Use Raw' checkbox shows un-normalized values.
+    # The raw layer MUST carry the same gene names on a clean (unnamed) index,
+    # or VIP's gene search (which reads the raw var) comes up empty.
+    raw_var = adata.var.copy()
+    raw_var.index = adata.var_names
+    raw_var.index.name = None
+    adata.raw = ad.AnnData(X=X, var=raw_var)
 
     # --- Embeddings ---------------------------------------------------------
     emb_files = sorted(glob.glob(os.path.join(csv_dir, "emb_*.csv")))

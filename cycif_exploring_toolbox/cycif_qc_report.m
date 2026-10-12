@@ -216,8 +216,18 @@ end
 % =====================================================================
 % REPLICATE-LEVEL SUMMARY
 % =====================================================================
-if p.summary && ~isempty(QC.xy)
+if ~isempty(QC.xy)
+    % Always aggregate (cheap, and carries the registration-attrition flags
+    % that the caller may want even when summary plotting is off).
     QC.agg = local_aggregate(QC.xy, nRounds);
+    % Convenience top-level list of flagged XYs (registration attrition):
+    % many rounds attempted, <50% passed -- the XY28 signature.
+    if isfield(QC.agg,'pass_frac')
+        fmask_flag = QC.agg.pass_frac < 0.5 & QC.agg.n_registered >= 3;
+        QC.flagged_xys = QC.agg.xy_ids(fmask_flag);
+    else
+        QC.flagged_xys = [];
+    end
     % dominant segmentation method across XYs (for title + filename)
     methods = {QC.xy.seg_method};
     umeth   = unique(methods);
@@ -548,6 +558,17 @@ agg.linkable    = arrayfun(@(x) x.n_linkable, xyQC);
 frac = nan(numel(xyQC), nRounds);
 postd = nan(numel(xyQC), nRounds);
 poorrate = zeros(1, nRounds); poorden = zeros(1, nRounds);
+% Per-XY registration attrition: how many rounds were REGISTERED (tp populated,
+% i.e. the linker ran registration for that round) vs how many PASSED (became
+% acquired = registered well enough that measurement was written). A large gap
+% means the linker attempted many rounds for this XY but failed most of them --
+% the XY28 signature (huge stage drift -> geometric-outlier auto-fail -> no
+% column written -> round silently absent from the per-XY figure's x-axis).
+% Rounds whose tp is all-NaN are genuinely pending/never-run (empty chan_map),
+% NOT failures, so they are excluded from the "attempted" count.
+n_registered = zeros(1, numel(xyQC));   % rounds with a real tp (attempted)
+n_passed     = zeros(1, numel(xyQC));   % rounds that became acquired
+n_failed     = zeros(1, numel(xyQC));   % registered but failed (attempted - passed-among-registered)
 for i = 1:numel(xyQC)
     P = xyQC(i).presence;
     frac(i,:) = mean(P,1);
@@ -558,27 +579,54 @@ for i = 1:numel(xyQC)
             poorrate(r) = poorrate(r) + double(~xyQC(i).well_reg(r));
         end
     end
+    % attempted = tp populated (tx non-NaN); failed flag comes straight from
+    % the linker's own geometric-outlier / improvement gate.
+    tp_run = arrayfun(@(rr) ~isnan(xyQC(i).reg(rr).tx), 1:nRounds);
+    fl     = arrayfun(@(rr) logical(xyQC(i).reg(rr).failed), 1:nRounds);
+    n_registered(i) = sum(tp_run);
+    n_passed(i)     = numel(xyQC(i).rounds_acquired);
+    n_failed(i)     = sum(tp_run & fl);
 end
 agg.round_measured_frac = frac;
 agg.round_post_nn       = postd;
 agg.round_poor_frac     = poorrate ./ max(poorden,1);   % frac of XYs poorly-reg per round
+agg.xy_ids           = arrayfun(@(x) x.xy, xyQC);
+agg.n_registered     = n_registered;   % [1 x nXY] rounds with real tp
+agg.n_passed         = n_passed;        % [1 x nXY] rounds acquired
+agg.n_failed         = n_failed;        % [1 x nXY] registered-but-failed rounds
+agg.pass_frac        = n_passed ./ max(n_registered,1);   % fraction of attempted rounds that passed
 % overall followability per XY: measured vs well-registered
 agg.frac_survive_all = arrayfun(@(x) ...
     mean(x.survived      >= numel(x.rounds_acquired)), xyQC);
 agg.frac_survive_good = arrayfun(@(x) ...
     mean(x.survived_good >= numel(x.rounds_acquired)), xyQC);
+
+% Console flag for problem XYs: many rounds attempted, few passed. Surfaces
+% XY28-type failures without needing to eyeball each per-XY figure. Threshold
+% is deliberately loose (pass_frac < 0.5 AND at least 3 rounds attempted) so it
+% catches genuine attrition without flagging XYs that only ever had 1-2 rounds.
+flagged = find(agg.pass_frac < 0.5 & agg.n_registered >= 3);
+if ~isempty(flagged)
+    fprintf('\n[cycif_qc_report] REGISTRATION-ATTRITION WARNING: %d XY(s) passed <50%% of attempted rounds:\n', numel(flagged));
+    for j = flagged
+        fprintf('   XY%02d: %d/%d rounds passed (%d failed registration), %d mask nuclei\n', ...
+            agg.xy_ids(j), agg.n_passed(j), agg.n_registered(j), ...
+            agg.n_failed(j), agg.masknuc(j));
+    end
+    fprintf('   -> large stage drift or sparse/low-quality fields; consider excluding.\n');
+end
 end
 
 function f = local_plot_summary(agg, xyQC, nRounds, seg_tag)
-% Replicate-level summary (2×2, 4 panels): per-round registration quality, mask
-% nucleus counts, whole-panel followability by XY, linkable vs mask nuclei.
-% (Followability-per-XY and per-round-measured-fraction panels dropped by
-% request.)
+% Replicate-level summary (2×3, 5 panels): per-round registration quality, mask
+% nucleus counts, whole-panel followability by XY, linkable vs mask nuclei, and
+% per-XY registration attrition (rounds passed vs attempted -- the panel that
+% surfaces XY28-type failures where many rounds registered but few passed).
 if nargin < 4 || isempty(seg_tag), seg_tag = 'unknown'; end
 FS = 10;
-f = figure('Color','w','Position',[60 60 1000 880], ...
+f = figure('Color','w','Position',[60 60 1500 880], ...
            'Name',sprintf('CyCIF QC — replicate summary [%s]', seg_tag));
-tl = tiledlayout(f,2,2,'Padding','compact','TileSpacing','compact');
+tl = tiledlayout(f,2,3,'Padding','compact','TileSpacing','compact');
 title(tl, sprintf('CyCIF QC — replicate summary (%d XYs)   ·   seg: %s', ...
       agg.n_xy, seg_tag), 'FontWeight','bold','FontSize',13);
 
@@ -625,6 +673,33 @@ scatter(ax, agg.masknuc, agg.linkable, 32, [0.2 0.4 0.7], 'filled','MarkerFaceAl
 hold(ax,'on'); mx = max(agg.masknuc); plot(ax,[0 mx],[0 mx],'k--');
 xlabel(ax,'mask nuclei','FontSize',FS); ylabel(ax,'linkable cells','FontSize',FS);
 axis(ax,'equal'); ax.FontSize=FS-1; title(ax,'Linkable vs mask nuclei','FontSize',FS); grid(ax,'on');
+
+% (5) REGISTRATION ATTRITION per XY — rounds passed vs attempted. An XY where
+%     many rounds registered (attempted) but few passed is the XY28 signature:
+%     large stage drift auto-failing rounds so their columns are never written
+%     and they silently vanish from that XY's per-XY figure x-axis. Flagged XYs
+%     (pass_frac < 0.5 with >=3 attempted) are drawn in red so they stand out.
+ax = nexttile(tl);
+if isfield(agg,'n_registered') && ~isempty(agg.n_registered)
+    xids = agg.xy_ids;
+    flagged = agg.pass_frac < 0.5 & agg.n_registered >= 3;
+    hold(ax,'on');
+    % attempted as a light backdrop bar, passed as the solid foreground bar
+    bar(ax, xids, agg.n_registered, 0.8, 'FaceColor',[0.85 0.85 0.85], 'EdgeColor','none', 'DisplayName','attempted');
+    bp = bar(ax, xids, agg.n_passed, 0.8, 'FaceColor',[0.35 0.55 0.75], 'EdgeColor','none', 'DisplayName','passed');
+    % recolor flagged XYs' passed bars to red via a second overlay bar
+    if any(flagged)
+        pv = agg.n_passed; pv(~flagged) = 0;
+        br = bar(ax, xids, pv, 0.8, 'FaceColor',[0.85 0.2 0.2], 'EdgeColor','none', 'DisplayName','flagged (<50% passed)');
+    end
+    xlabel(ax,'XY','FontSize',FS); ylabel(ax,'# rounds','FontSize',FS);
+    legend(ax,'Location','northoutside','Orientation','horizontal','FontSize',FS-3,'Box','off');
+    ax.FontSize=FS-1; grid(ax,'on');
+    nflag = sum(flagged);
+    title(ax, sprintf('Registration attrition — %d XY(s) flagged', nflag),'FontSize',FS);
+else
+    axis(ax,'off'); text(ax,0.5,0.5,'attrition data n/a','Units','normalized','HorizontalAlignment','center');
+end
 end
 
 function local_hist_bars(ax, v, facecolor)
